@@ -1,0 +1,28 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gogoga-dictionary:latest
+    container_name: gogoga-dictionary-api
+    ports:
+      - "8080:8080"
+    environment:
+      HTTP_ADDR: ":8080"
+      DB_PATH: "/app/data/dict.db"
+      SCHEMA_PATH: "/app/migrations/schema.sql"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  importer:
+    image: gogoga-dictionary:latest
+    container_name: gogoga-dictionary-importer
+    command: ["importer", "-csv", "/app/datasets/ecdict.csv", "-db", "/app/data/dict.db", "-schema", "/app/migrations/schema.sql"]
+    environment:
+      DB_PATH: "/app/data/dict.db"
+      SCHEMA_PATH: "/app/migrations/schema.sql"
+    volumes:
+      - ./data:/app/data
+      - ./datasets:/app/datasets:ro
+    profiles: ["tools"]

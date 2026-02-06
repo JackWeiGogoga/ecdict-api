@@ -1,0 +1,19 @@
+# Build artifacts
+bin/
+*.exe
+*.test
+*.out
+
+# Local runtime data
+data/
+datasets/*.csv
+!datasets/ecdict.csv
+
+# Local caches
+.cache/
+
+# Coverage
+coverage.out
+
+# OS files
+.DS_Store

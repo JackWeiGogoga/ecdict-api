@@ -1,0 +1,10 @@
+.git
+.gitignore
+.cache
+data
+bin
+*.log
+
+# Large local datasets should be mounted, not copied into image
+datasets
+ecdict.csv
