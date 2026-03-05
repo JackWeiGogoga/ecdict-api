@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"gogoga_dictionary/internal/db"
+	"gogoga_dictionary/internal/feedback"
 	httpapi "gogoga_dictionary/internal/http"
 	"gogoga_dictionary/internal/repo"
 )
@@ -34,7 +36,30 @@ func main() {
 	}
 
 	wordRepo := repo.NewWordRepository(conn)
-	h := httpapi.NewHandler(wordRepo)
+
+	var feedbackSvc *feedback.Service
+	feedbackAppID := strings.TrimSpace(getenv("FEISHU_APP_ID", ""))
+	feedbackAppSecret := strings.TrimSpace(getenv("FEISHU_APP_SECRET", ""))
+	feedbackAppToken := strings.TrimSpace(getenv("FEISHU_BITABLE_APP_TOKEN", ""))
+	feedbackTableID := strings.TrimSpace(getenv("FEISHU_BITABLE_TABLE_ID", ""))
+	if feedbackAppID != "" && feedbackAppSecret != "" && feedbackAppToken != "" && feedbackTableID != "" {
+		svc, err := feedback.NewService(feedback.Config{
+			AppID:     feedbackAppID,
+			AppSecret: feedbackAppSecret,
+			AppToken:  feedbackAppToken,
+			TableID:   feedbackTableID,
+		})
+		if err != nil {
+			log.Printf("feedback service disabled: %v", err)
+		} else {
+			feedbackSvc = svc
+			log.Printf("feedback service enabled")
+		}
+	} else {
+		log.Printf("feedback service disabled: missing FEISHU_* env")
+	}
+
+	h := httpapi.NewHandler(wordRepo, feedbackSvc)
 
 	mux := http.NewServeMux()
 	h.Register(mux)

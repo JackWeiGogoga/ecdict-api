@@ -2,20 +2,26 @@ package httpapi
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"gogoga_dictionary/internal/feedback"
 	"gogoga_dictionary/internal/repo"
 )
 
 type Handler struct {
-	repo *repo.WordRepository
+	repo        *repo.WordRepository
+	feedbackSvc *feedback.Service
 }
 
-func NewHandler(repo *repo.WordRepository) *Handler {
-	return &Handler{repo: repo}
+func NewHandler(repo *repo.WordRepository, feedbackSvc *feedback.Service) *Handler {
+	return &Handler{
+		repo:        repo,
+		feedbackSvc: feedbackSvc,
+	}
 }
 
 type response struct {
@@ -30,6 +36,18 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/word/", h.getWord)
 	mux.HandleFunc("/v1/search", h.search)
 	mux.HandleFunc("/v1/suggest", h.suggest)
+	mux.HandleFunc("/v1/feedback", h.submitFeedback)
+}
+
+type feedbackRequest struct {
+	ClientFeedbackID string `json:"client_feedback_id"`
+	Content          string `json:"content"`
+	UserID           string `json:"user_id"`
+	Device           string `json:"device"`
+	IOSVersion       string `json:"ios_version"`
+	AppVersion       string `json:"app_version"`
+	Locale           string `json:"locale"`
+	ScreenshotURL    string `json:"screenshot_url"`
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +142,70 @@ func (h *Handler) suggest(w http.ResponseWriter, r *http.Request) {
 			"items": out,
 			"q":     q,
 			"limit": limit,
+		},
+		RequestID:  requestID(r),
+		ServerTime: nowISO(),
+	})
+}
+
+func (h *Handler) submitFeedback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response{Error: "method not allowed", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if h.feedbackSvc == nil {
+		writeJSON(w, http.StatusServiceUnavailable, response{Error: "feedback service unavailable", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	var req feedbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "invalid json body", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	req.ClientFeedbackID = strings.TrimSpace(req.ClientFeedbackID)
+	req.Content = strings.TrimSpace(req.Content)
+	req.UserID = strings.TrimSpace(req.UserID)
+	req.Device = strings.TrimSpace(req.Device)
+	req.IOSVersion = strings.TrimSpace(req.IOSVersion)
+	req.AppVersion = strings.TrimSpace(req.AppVersion)
+	req.Locale = strings.TrimSpace(req.Locale)
+	req.ScreenshotURL = strings.TrimSpace(req.ScreenshotURL)
+
+	if req.ClientFeedbackID == "" {
+		writeJSON(w, http.StatusBadRequest, response{Error: "missing client_feedback_id", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if req.Content == "" {
+		writeJSON(w, http.StatusBadRequest, response{Error: "missing content", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if len([]rune(req.Content)) > 4000 {
+		writeJSON(w, http.StatusBadRequest, response{Error: "content too long", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	err := h.feedbackSvc.Submit(r.Context(), feedback.Record{
+		ClientFeedbackID: req.ClientFeedbackID,
+		Content:          req.Content,
+		UserID:           req.UserID,
+		Device:           req.Device,
+		IOSVersion:       req.IOSVersion,
+		AppVersion:       req.AppVersion,
+		Locale:           req.Locale,
+		ScreenshotURL:    req.ScreenshotURL,
+		CreatedAt:        time.Now().UTC(),
+	})
+	if err != nil {
+		log.Printf("submit feedback failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, response{Error: "submit feedback failed", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{
+		Data: map[string]any{
+			"accepted": true,
 		},
 		RequestID:  requestID(r),
 		ServerTime: nowISO(),

@@ -81,7 +81,7 @@ docker compose build
 3. 导入词库（首次或词库更新后执行）
 
 ```bash
-docker compose run --rm --profile tools importer
+docker compose --profile tools run --rm importer
 ```
 
 4. 启动 API 服务

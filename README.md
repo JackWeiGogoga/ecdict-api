@@ -81,7 +81,7 @@ docker compose build
 3. Import dictionary data (one-time or when dataset updates)
 
 ```bash
-docker compose run --rm --profile tools importer
+docker compose --profile tools run --rm importer
 ```
 
 4. Start API service
