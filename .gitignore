@@ -17,3 +17,6 @@ coverage.out
 
 # OS files
 .DS_Store
+
+.env
+.env.local
