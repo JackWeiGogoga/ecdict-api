@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -10,17 +12,24 @@ import (
 
 	"gogoga_dictionary/internal/feedback"
 	"gogoga_dictionary/internal/repo"
+	"gogoga_dictionary/internal/upload"
+)
+
+const (
+	maxFeedbackImageBytes = 10 << 20 // 10MB
 )
 
 type Handler struct {
 	repo        *repo.WordRepository
 	feedbackSvc *feedback.Service
+	uploadSvc   *upload.Service
 }
 
-func NewHandler(repo *repo.WordRepository, feedbackSvc *feedback.Service) *Handler {
+func NewHandler(repo *repo.WordRepository, feedbackSvc *feedback.Service, uploadSvc *upload.Service) *Handler {
 	return &Handler{
 		repo:        repo,
 		feedbackSvc: feedbackSvc,
+		uploadSvc:   uploadSvc,
 	}
 }
 
@@ -36,6 +45,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/word/", h.getWord)
 	mux.HandleFunc("/v1/search", h.search)
 	mux.HandleFunc("/v1/suggest", h.suggest)
+	mux.HandleFunc("/v1/feedback/upload-image", h.uploadFeedbackImage)
 	mux.HandleFunc("/v1/feedback", h.submitFeedback)
 }
 
@@ -142,6 +152,72 @@ func (h *Handler) suggest(w http.ResponseWriter, r *http.Request) {
 			"items": out,
 			"q":     q,
 			"limit": limit,
+		},
+		RequestID:  requestID(r),
+		ServerTime: nowISO(),
+	})
+}
+
+func (h *Handler) uploadFeedbackImage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response{Error: "method not allowed", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if h.uploadSvc == nil {
+		writeJSON(w, http.StatusServiceUnavailable, response{Error: "upload service unavailable", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxFeedbackImageBytes)
+	if err := r.ParseMultipartForm(maxFeedbackImageBytes); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "invalid multipart form or file too large", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "missing file", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	defer file.Close()
+
+	contentType := strings.TrimSpace(header.Header.Get("Content-Type"))
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		writeJSON(w, http.StatusBadRequest, response{Error: "only image files are allowed", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	content, err := io.ReadAll(io.LimitReader(file, maxFeedbackImageBytes+1))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "read file failed", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if len(content) == 0 {
+		writeJSON(w, http.StatusBadRequest, response{Error: "empty file", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if len(content) > maxFeedbackImageBytes {
+		writeJSON(w, http.StatusBadRequest, response{Error: "file too large", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	keyPrefix := strings.TrimSpace(r.FormValue("key_prefix"))
+
+	result, err := h.uploadSvc.UploadImage(r.Context(), content, contentType, header.Filename, keyPrefix)
+	if err != nil {
+		if errors.Is(err, upload.ErrInvalidKeyPrefix) {
+			writeJSON(w, http.StatusBadRequest, response{Error: err.Error(), RequestID: requestID(r), ServerTime: nowISO()})
+			return
+		}
+		log.Printf("upload feedback image failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, response{Error: "upload image failed", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{
+		Data: map[string]any{
+			"url": result.URL,
+			"key": result.Key,
 		},
 		RequestID:  requestID(r),
 		ServerTime: nowISO(),

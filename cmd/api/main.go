@@ -14,6 +14,7 @@ import (
 	"gogoga_dictionary/internal/feedback"
 	httpapi "gogoga_dictionary/internal/http"
 	"gogoga_dictionary/internal/repo"
+	"gogoga_dictionary/internal/upload"
 )
 
 func main() {
@@ -59,7 +60,31 @@ func main() {
 		log.Printf("feedback service disabled: missing FEISHU_* env")
 	}
 
-	h := httpapi.NewHandler(wordRepo, feedbackSvc)
+	var uploadSvc *upload.Service
+	qiniuAK := strings.TrimSpace(getenv("QINIU_ACCESS_KEY", ""))
+	qiniuSK := strings.TrimSpace(getenv("QINIU_SECRET_KEY", ""))
+	qiniuBucket := strings.TrimSpace(getenv("QINIU_BUCKET", ""))
+	qiniuUploadURL := strings.TrimSpace(getenv("QINIU_UPLOAD_URL", ""))
+	qiniuPublicBaseURL := strings.TrimSpace(getenv("QINIU_PUBLIC_BASE_URL", ""))
+	if qiniuAK != "" && qiniuSK != "" && qiniuBucket != "" && qiniuUploadURL != "" && qiniuPublicBaseURL != "" {
+		svc, err := upload.NewQiniuService(upload.Config{
+			AccessKey:     qiniuAK,
+			SecretKey:     qiniuSK,
+			Bucket:        qiniuBucket,
+			UploadURL:     qiniuUploadURL,
+			PublicBaseURL: qiniuPublicBaseURL,
+		})
+		if err != nil {
+			log.Printf("upload service disabled: %v", err)
+		} else {
+			uploadSvc = svc
+			log.Printf("upload service enabled")
+		}
+	} else {
+		log.Printf("upload service disabled: missing QINIU_* env")
+	}
+
+	h := httpapi.NewHandler(wordRepo, feedbackSvc, uploadSvc)
 
 	mux := http.NewServeMux()
 	h.Register(mux)
