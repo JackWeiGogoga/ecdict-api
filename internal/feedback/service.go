@@ -27,6 +27,7 @@ type Config struct {
 type Record struct {
 	ClientFeedbackID string
 	Content          string
+	Category         string
 	UserID           string
 	Device           string
 	IOSVersion       string
@@ -90,6 +91,7 @@ func (s *Service) Submit(ctx context.Context, record Record) error {
 	fields := map[string]any{
 		"client_feedback_id": record.ClientFeedbackID,
 		"content":            record.Content,
+		"category":           record.Category,
 		"user_id":            record.UserID,
 		"device":             record.Device,
 		"ios_version":        record.IOSVersion,

@@ -57,6 +57,7 @@ type feedbackRequest struct {
 	IOSVersion       string `json:"ios_version"`
 	AppVersion       string `json:"app_version"`
 	Locale           string `json:"locale"`
+	Category         string `json:"category"`
 	ScreenshotURL    string `json:"screenshot_url"`
 }
 
@@ -247,6 +248,7 @@ func (h *Handler) submitFeedback(w http.ResponseWriter, r *http.Request) {
 	req.IOSVersion = strings.TrimSpace(req.IOSVersion)
 	req.AppVersion = strings.TrimSpace(req.AppVersion)
 	req.Locale = strings.TrimSpace(req.Locale)
+	req.Category = strings.TrimSpace(req.Category)
 	req.ScreenshotURL = strings.TrimSpace(req.ScreenshotURL)
 
 	if req.ClientFeedbackID == "" {
@@ -265,6 +267,7 @@ func (h *Handler) submitFeedback(w http.ResponseWriter, r *http.Request) {
 	err := h.feedbackSvc.Submit(r.Context(), feedback.Record{
 		ClientFeedbackID: req.ClientFeedbackID,
 		Content:          req.Content,
+		Category:         req.Category,
 		UserID:           req.UserID,
 		Device:           req.Device,
 		IOSVersion:       req.IOSVersion,
