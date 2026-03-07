@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"gogoga_dictionary/internal/analytics"
 	"gogoga_dictionary/internal/feedback"
 	"gogoga_dictionary/internal/repo"
 	"gogoga_dictionary/internal/upload"
@@ -20,16 +21,18 @@ const (
 )
 
 type Handler struct {
-	repo        *repo.WordRepository
-	feedbackSvc *feedback.Service
-	uploadSvc   *upload.Service
+	repo         *repo.WordRepository
+	analyticsSvc *analytics.Service
+	feedbackSvc  *feedback.Service
+	uploadSvc    *upload.Service
 }
 
-func NewHandler(repo *repo.WordRepository, feedbackSvc *feedback.Service, uploadSvc *upload.Service) *Handler {
+func NewHandler(repo *repo.WordRepository, analyticsSvc *analytics.Service, feedbackSvc *feedback.Service, uploadSvc *upload.Service) *Handler {
 	return &Handler{
-		repo:        repo,
-		feedbackSvc: feedbackSvc,
-		uploadSvc:   uploadSvc,
+		repo:         repo,
+		analyticsSvc: analyticsSvc,
+		feedbackSvc:  feedbackSvc,
+		uploadSvc:    uploadSvc,
 	}
 }
 
@@ -45,8 +48,30 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/word/", h.getWord)
 	mux.HandleFunc("/v1/search", h.search)
 	mux.HandleFunc("/v1/suggest", h.suggest)
+	mux.HandleFunc("/v1/analytics/events", h.submitAnalyticsEvents)
 	mux.HandleFunc("/v1/feedback/upload-image", h.uploadFeedbackImage)
 	mux.HandleFunc("/v1/feedback", h.submitFeedback)
+}
+
+type analyticsEventsRequest struct {
+	Events []analyticsEventRequest `json:"events"`
+}
+
+type analyticsEventRequest struct {
+	EventID        string         `json:"event_id"`
+	EventName      string         `json:"event_name"`
+	UserID         string         `json:"user_id"`
+	SessionID      string         `json:"session_id"`
+	Platform       string         `json:"platform"`
+	AppVersion     string         `json:"app_version"`
+	Build          string         `json:"build"`
+	SystemLanguage string         `json:"system_language"`
+	SystemLocale   string         `json:"system_locale"`
+	AppLanguage    string         `json:"app_language"`
+	PageName       string         `json:"page_name"`
+	EventTimeMS    int64          `json:"event_time_ms"`
+	DurationMS     *int64         `json:"duration_ms"`
+	Params         map[string]any `json:"params"`
 }
 
 type feedbackRequest struct {
@@ -153,6 +178,61 @@ func (h *Handler) suggest(w http.ResponseWriter, r *http.Request) {
 			"items": out,
 			"q":     q,
 			"limit": limit,
+		},
+		RequestID:  requestID(r),
+		ServerTime: nowISO(),
+	})
+}
+
+func (h *Handler) submitAnalyticsEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response{Error: "method not allowed", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if h.analyticsSvc == nil {
+		writeJSON(w, http.StatusServiceUnavailable, response{Error: "analytics service unavailable", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	var req analyticsEventsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "invalid json body", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if len(req.Events) == 0 {
+		writeJSON(w, http.StatusBadRequest, response{Error: "missing events", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	events := make([]analytics.Event, 0, len(req.Events))
+	for _, item := range req.Events {
+		events = append(events, analytics.Event{
+			EventID:        strings.TrimSpace(item.EventID),
+			EventName:      strings.TrimSpace(item.EventName),
+			UserID:         strings.TrimSpace(item.UserID),
+			SessionID:      strings.TrimSpace(item.SessionID),
+			Platform:       strings.TrimSpace(item.Platform),
+			AppVersion:     strings.TrimSpace(item.AppVersion),
+			Build:          strings.TrimSpace(item.Build),
+			SystemLanguage: strings.TrimSpace(item.SystemLanguage),
+			SystemLocale:   strings.TrimSpace(item.SystemLocale),
+			AppLanguage:    strings.TrimSpace(item.AppLanguage),
+			PageName:       strings.TrimSpace(item.PageName),
+			EventTimeMS:    item.EventTimeMS,
+			DurationMS:     item.DurationMS,
+			Params:         item.Params,
+		})
+	}
+
+	accepted, err := h.analyticsSvc.InsertBatch(r.Context(), events)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error(), RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{
+		Data: map[string]any{
+			"accepted": accepted,
 		},
 		RequestID:  requestID(r),
 		ServerTime: nowISO(),
