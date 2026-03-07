@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"gogoga_dictionary/internal/analytics"
 	"gogoga_dictionary/internal/db"
 	"gogoga_dictionary/internal/feedback"
 	httpapi "gogoga_dictionary/internal/http"
@@ -37,6 +38,7 @@ func main() {
 	}
 
 	wordRepo := repo.NewWordRepository(conn)
+	analyticsSvc := analytics.NewService(conn)
 
 	var feedbackSvc *feedback.Service
 	feedbackAppID := strings.TrimSpace(getenv("FEISHU_APP_ID", ""))
@@ -84,7 +86,7 @@ func main() {
 		log.Printf("upload service disabled: missing QINIU_* env")
 	}
 
-	h := httpapi.NewHandler(wordRepo, feedbackSvc, uploadSvc)
+	h := httpapi.NewHandler(wordRepo, analyticsSvc, feedbackSvc, uploadSvc)
 
 	mux := http.NewServeMux()
 	h.Register(mux)
