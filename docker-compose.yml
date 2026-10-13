@@ -20,6 +20,12 @@ services:
       QINIU_BUCKET: "${QINIU_BUCKET}"
       QINIU_UPLOAD_URL: "${QINIU_UPLOAD_URL}"
       QINIU_PUBLIC_BASE_URL: "${QINIU_PUBLIC_BASE_URL}"
+      LLM_OPENROUTER_API_KEY: "${LLM_OPENROUTER_API_KEY}"
+      LLM_ARK_API_KEY: "${LLM_ARK_API_KEY}"
+      LLM_OPENROUTER_MODELS: "${LLM_OPENROUTER_MODELS:-}"
+      LLM_ARK_MODELS: "${LLM_ARK_MODELS:-}"
+      LLM_MAX_BODY_MB: "${LLM_MAX_BODY_MB:-}"
+      LLM_RATE_PER_MINUTE: "${LLM_RATE_PER_MINUTE:-}"
     volumes:
       - ./data:/app/data
     restart: unless-stopped

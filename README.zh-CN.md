@@ -101,6 +101,9 @@ curl 'http://127.0.0.1:8080/v1/health'
 - `HTTP_ADDR`（默认：`:8080`）
 - `DB_PATH`（默认：`./data/dict.db`；容器内默认：`/app/data/dict.db`）
 - `SCHEMA_PATH`（默认：`./migrations/schema.sql`；容器内默认：`/app/migrations/schema.sql`）
+- `LLM_OPENROUTER_API_KEY` / `LLM_ARK_API_KEY`：配置后启用 `POST /v1/llm/openrouter` 和 `POST /v1/llm/ark`。代理原样转发厂商格式的请求体，在服务端注入密钥，JSON 和 SSE 响应原样流式返回
+- `LLM_OPENROUTER_MODELS` / `LLM_ARK_MODELS`：逗号分隔的模型白名单（默认值与 iOS 端一致）
+- `LLM_MAX_BODY_MB`（默认：`20`）、`LLM_RATE_PER_MINUTE`（按客户端 IP，默认：`60`）
 
 ## API 示例
 
@@ -109,6 +112,8 @@ curl 'http://127.0.0.1:8080/v1/word/apple'
 curl 'http://127.0.0.1:8080/v1/suggest?q=app&limit=5'
 curl 'http://127.0.0.1:8080/v1/search?q=apple&mode=prefix&page=1&page_size=20'
 curl 'http://127.0.0.1:8080/v1/search?q=network security&mode=fuzzy&page=1&page_size=20'
+curl -N -X POST 'http://127.0.0.1:8080/v1/llm/openrouter' -H 'Content-Type: application/json' \
+  -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## ECDICT CSV 字段要求

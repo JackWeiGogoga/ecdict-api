@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"gogoga_dictionary/internal/db"
 	"gogoga_dictionary/internal/feedback"
 	httpapi "gogoga_dictionary/internal/http"
+	"gogoga_dictionary/internal/llmproxy"
 	"gogoga_dictionary/internal/repo"
 	"gogoga_dictionary/internal/upload"
 )
@@ -86,7 +88,32 @@ func main() {
 		log.Printf("upload service disabled: missing QINIU_* env")
 	}
 
-	h := httpapi.NewHandler(wordRepo, analyticsSvc, feedbackSvc, uploadSvc)
+	var llmProxy *llmproxy.Proxy
+	proxy, err := llmproxy.New(llmproxy.Config{
+		Upstreams: map[string]llmproxy.Upstream{
+			"openrouter": {
+				URL:           getenv("LLM_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions"),
+				APIKey:        getenv("LLM_OPENROUTER_API_KEY", ""),
+				Headers:       map[string]string{"X-Title": "Lingshot iOS"},
+				AllowedModels: strings.Split(getenv("LLM_OPENROUTER_MODELS", "openai/gpt-4o,openai/gpt-4o-mini,openai/gpt-5-mini,openai/gpt-5.2,bytedance-seed/seed-1.6,deepseek/deepseek-v3.2,google/gemini-3-flash-preview"), ","),
+			},
+			"ark": {
+				URL:           getenv("LLM_ARK_URL", "https://ark.cn-beijing.volces.com/api/v3/responses"),
+				APIKey:        getenv("LLM_ARK_API_KEY", ""),
+				AllowedModels: strings.Split(getenv("LLM_ARK_MODELS", "doubao-seed-2-1-lite-260915"), ","),
+			},
+		},
+		MaxBodyBytes:  int64(getenvInt("LLM_MAX_BODY_MB", 20)) << 20,
+		RatePerMinute: getenvInt("LLM_RATE_PER_MINUTE", 60),
+	})
+	if err != nil {
+		log.Printf("llm proxy disabled: %v", err)
+	} else {
+		llmProxy = proxy
+		log.Printf("llm proxy enabled: %v", proxy.Providers())
+	}
+
+	h := httpapi.NewHandler(wordRepo, analyticsSvc, feedbackSvc, uploadSvc, llmProxy)
 
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -120,6 +147,14 @@ func main() {
 func getenv(key string, fallback string) string {
 	v := os.Getenv(key)
 	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+func getenvInt(key string, fallback int) int {
+	v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key)))
+	if err != nil || v <= 0 {
 		return fallback
 	}
 	return v

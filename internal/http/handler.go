@@ -12,6 +12,7 @@ import (
 
 	"gogoga_dictionary/internal/analytics"
 	"gogoga_dictionary/internal/feedback"
+	"gogoga_dictionary/internal/llmproxy"
 	"gogoga_dictionary/internal/repo"
 	"gogoga_dictionary/internal/upload"
 )
@@ -25,14 +26,16 @@ type Handler struct {
 	analyticsSvc *analytics.Service
 	feedbackSvc  *feedback.Service
 	uploadSvc    *upload.Service
+	llmProxy     *llmproxy.Proxy
 }
 
-func NewHandler(repo *repo.WordRepository, analyticsSvc *analytics.Service, feedbackSvc *feedback.Service, uploadSvc *upload.Service) *Handler {
+func NewHandler(repo *repo.WordRepository, analyticsSvc *analytics.Service, feedbackSvc *feedback.Service, uploadSvc *upload.Service, llmProxy *llmproxy.Proxy) *Handler {
 	return &Handler{
 		repo:         repo,
 		analyticsSvc: analyticsSvc,
 		feedbackSvc:  feedbackSvc,
 		uploadSvc:    uploadSvc,
+		llmProxy:     llmProxy,
 	}
 }
 
@@ -51,6 +54,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/analytics/events", h.submitAnalyticsEvents)
 	mux.HandleFunc("/v1/feedback/upload-image", h.uploadFeedbackImage)
 	mux.HandleFunc("/v1/feedback", h.submitFeedback)
+	mux.HandleFunc("/v1/llm/", h.proxyLLM)
 }
 
 type analyticsEventsRequest struct {
@@ -369,6 +373,41 @@ func (h *Handler) submitFeedback(w http.ResponseWriter, r *http.Request) {
 		RequestID:  requestID(r),
 		ServerTime: nowISO(),
 	})
+}
+
+func (h *Handler) proxyLLM(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response{Error: "method not allowed", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if h.llmProxy == nil {
+		writeJSON(w, http.StatusServiceUnavailable, response{Error: "llm proxy unavailable", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	provider := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/llm/"), "/")
+	err := h.llmProxy.Forward(w, r, provider)
+	if err == nil {
+		return
+	}
+
+	status := http.StatusBadGateway
+	message := "llm upstream request failed"
+	switch {
+	case errors.Is(err, llmproxy.ErrUnknownProvider):
+		status, message = http.StatusNotFound, "unknown provider"
+	case errors.Is(err, llmproxy.ErrRateLimited):
+		status, message = http.StatusTooManyRequests, "too many requests"
+	case errors.Is(err, llmproxy.ErrBodyTooLarge):
+		status, message = http.StatusRequestEntityTooLarge, "request body too large"
+	case errors.Is(err, llmproxy.ErrInvalidBody):
+		status, message = http.StatusBadRequest, "invalid json body"
+	case errors.Is(err, llmproxy.ErrModelNotAllowed):
+		status, message = http.StatusForbidden, err.Error()
+	default:
+		log.Printf("llm proxy %s failed: %v", provider, err)
+	}
+	writeJSON(w, status, response{Error: message, RequestID: requestID(r), ServerTime: nowISO()})
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload response) {
