@@ -101,8 +101,10 @@ curl 'http://127.0.0.1:8080/v1/health'
 - `HTTP_ADDR`（默认：`:8080`）
 - `DB_PATH`（默认：`./data/dict.db`；容器内默认：`/app/data/dict.db`）
 - `SCHEMA_PATH`（默认：`./migrations/schema.sql`；容器内默认：`/app/migrations/schema.sql`）
-- `LLM_OPENROUTER_API_KEY` / `LLM_ARK_API_KEY`：配置后启用 `POST /v1/llm/openrouter` 和 `POST /v1/llm/ark`。代理原样转发厂商格式的请求体，在服务端注入密钥，JSON 和 SSE 响应原样流式返回
-- `LLM_OPENROUTER_MODELS` / `LLM_ARK_MODELS`：逗号分隔的模型白名单（默认值与 iOS 端一致）
+- `LLM_ARK_API_KEY`：配置后启用 `POST /v1/llm/ark`，即火山方舟 Responses API 的代理。请求体原样转发，在服务端注入密钥，JSON 和 SSE 响应原样流式返回
+- `LLM_ARK_MODELS`：逗号分隔的模型白名单（默认值与 iOS 端一致）
+- `VOLC_SPEECH_API_KEY`：配置后启用 `POST /v1/tts`（豆包语音合成 `seed-tts-2.0`）。请求体 `{"text","speaker","speech_rate"}`，返回 `audio/mpeg`。100 字以内的文本会缓存到 `TTS_CACHE_DIR`（默认 `<DB_PATH 所在目录>/tts-cache`），更长的文本不落盘
+- `VOLC_TTS_SPEAKERS`（音色白名单，默认值与 iOS 端一致）、`TTS_RATE_PER_MINUTE`（按客户端 IP，默认：`120`）
 - `LLM_MAX_BODY_MB`（默认：`20`）、`LLM_RATE_PER_MINUTE`（按客户端 IP，默认：`60`）
 
 ## API 示例
@@ -112,8 +114,10 @@ curl 'http://127.0.0.1:8080/v1/word/apple'
 curl 'http://127.0.0.1:8080/v1/suggest?q=app&limit=5'
 curl 'http://127.0.0.1:8080/v1/search?q=apple&mode=prefix&page=1&page_size=20'
 curl 'http://127.0.0.1:8080/v1/search?q=network security&mode=fuzzy&page=1&page_size=20'
-curl -N -X POST 'http://127.0.0.1:8080/v1/llm/openrouter' -H 'Content-Type: application/json' \
-  -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
+curl -N -X POST 'http://127.0.0.1:8080/v1/llm/ark' -H 'Content-Type: application/json' \
+  -d '{"model":"doubao-seed-2-1-lite-260915","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}'
+curl -X POST 'http://127.0.0.1:8080/v1/tts' -H 'Content-Type: application/json' \
+  -d '{"text":"serendipity","speaker":"en_female_dacey_uranus_bigtts","speech_rate":0}' -o out.mp3
 ```
 
 ## ECDICT CSV 字段要求

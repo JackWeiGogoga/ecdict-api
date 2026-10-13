@@ -13,7 +13,9 @@ import (
 	"gogoga_dictionary/internal/analytics"
 	"gogoga_dictionary/internal/feedback"
 	"gogoga_dictionary/internal/llmproxy"
+	"gogoga_dictionary/internal/ratelimit"
 	"gogoga_dictionary/internal/repo"
+	"gogoga_dictionary/internal/tts"
 	"gogoga_dictionary/internal/upload"
 )
 
@@ -27,15 +29,19 @@ type Handler struct {
 	feedbackSvc  *feedback.Service
 	uploadSvc    *upload.Service
 	llmProxy     *llmproxy.Proxy
+	ttsSvc       *tts.Service
+	ttsLimiter   *ratelimit.Limiter
 }
 
-func NewHandler(repo *repo.WordRepository, analyticsSvc *analytics.Service, feedbackSvc *feedback.Service, uploadSvc *upload.Service, llmProxy *llmproxy.Proxy) *Handler {
+func NewHandler(repo *repo.WordRepository, analyticsSvc *analytics.Service, feedbackSvc *feedback.Service, uploadSvc *upload.Service, llmProxy *llmproxy.Proxy, ttsSvc *tts.Service, ttsLimiter *ratelimit.Limiter) *Handler {
 	return &Handler{
 		repo:         repo,
 		analyticsSvc: analyticsSvc,
 		feedbackSvc:  feedbackSvc,
 		uploadSvc:    uploadSvc,
 		llmProxy:     llmProxy,
+		ttsSvc:       ttsSvc,
+		ttsLimiter:   ttsLimiter,
 	}
 }
 
@@ -54,7 +60,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/analytics/events", h.submitAnalyticsEvents)
 	mux.HandleFunc("/v1/feedback/upload-image", h.uploadFeedbackImage)
 	mux.HandleFunc("/v1/feedback", h.submitFeedback)
-	mux.HandleFunc("/v1/llm/", h.proxyLLM)
+	mux.HandleFunc("/v1/llm/ark", h.proxyLLM)
+	mux.HandleFunc("/v1/tts", h.synthesizeSpeech)
 }
 
 type analyticsEventsRequest struct {
@@ -385,8 +392,7 @@ func (h *Handler) proxyLLM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/llm/"), "/")
-	err := h.llmProxy.Forward(w, r, provider)
+	err := h.llmProxy.Forward(w, r)
 	if err == nil {
 		return
 	}
@@ -394,8 +400,6 @@ func (h *Handler) proxyLLM(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusBadGateway
 	message := "llm upstream request failed"
 	switch {
-	case errors.Is(err, llmproxy.ErrUnknownProvider):
-		status, message = http.StatusNotFound, "unknown provider"
 	case errors.Is(err, llmproxy.ErrRateLimited):
 		status, message = http.StatusTooManyRequests, "too many requests"
 	case errors.Is(err, llmproxy.ErrBodyTooLarge):
@@ -405,9 +409,63 @@ func (h *Handler) proxyLLM(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, llmproxy.ErrModelNotAllowed):
 		status, message = http.StatusForbidden, err.Error()
 	default:
-		log.Printf("llm proxy %s failed: %v", provider, err)
+		log.Printf("llm proxy failed: %v", err)
 	}
 	writeJSON(w, status, response{Error: message, RequestID: requestID(r), ServerTime: nowISO()})
+}
+
+type ttsRequest struct {
+	Text       string `json:"text"`
+	Speaker    string `json:"speaker"`
+	SpeechRate int    `json:"speech_rate"`
+}
+
+// synthesizeSpeech returns an mp3 (Content-Type audio/mpeg); errors are the usual JSON envelope.
+func (h *Handler) synthesizeSpeech(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response{Error: "method not allowed", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if h.ttsSvc == nil {
+		writeJSON(w, http.StatusServiceUnavailable, response{Error: "tts service unavailable", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+	if h.ttsLimiter != nil && !h.ttsLimiter.Allow(ratelimit.ClientIP(r)) {
+		writeJSON(w, http.StatusTooManyRequests, response{Error: "too many requests", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	var req ttsRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "invalid json body", RequestID: requestID(r), ServerTime: nowISO()})
+		return
+	}
+
+	audio, cached, err := h.ttsSvc.Synthesize(r.Context(), tts.Request{
+		Text:       req.Text,
+		Speaker:    strings.TrimSpace(req.Speaker),
+		SpeechRate: req.SpeechRate,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, tts.ErrInvalidText), errors.Is(err, tts.ErrSpeakerNotAllowed):
+			writeJSON(w, http.StatusBadRequest, response{Error: err.Error(), RequestID: requestID(r), ServerTime: nowISO()})
+		default:
+			log.Printf("tts failed: %v", err)
+			writeJSON(w, http.StatusBadGateway, response{Error: "tts upstream failed", RequestID: requestID(r), ServerTime: nowISO()})
+		}
+		return
+	}
+
+	cacheStatus := "miss"
+	if cached {
+		cacheStatus = "hit"
+	}
+	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+	w.Header().Set("X-TTS-Cache", cacheStatus)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(audio)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload response) {

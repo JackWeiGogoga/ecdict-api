@@ -101,8 +101,10 @@ curl 'http://127.0.0.1:8080/v1/health'
 - `HTTP_ADDR` (default: `:8080`)
 - `DB_PATH` (default: `./data/dict.db`, container default: `/app/data/dict.db`)
 - `SCHEMA_PATH` (default: `./migrations/schema.sql`, container default: `/app/migrations/schema.sql`)
-- `LLM_OPENROUTER_API_KEY` / `LLM_ARK_API_KEY`: enable `POST /v1/llm/openrouter` and `POST /v1/llm/ark`. The proxy forwards the provider-native JSON body (JSON or SSE response is streamed back unchanged) and injects the key server-side.
-- `LLM_OPENROUTER_MODELS` / `LLM_ARK_MODELS`: comma-separated model allowlists (defaults match the iOS app)
+- `LLM_ARK_API_KEY`: enables `POST /v1/llm/ark`, a proxy to the Volcengine Ark Responses API. It forwards the request body unchanged (JSON or SSE response is streamed back as-is) and injects the key server-side.
+- `LLM_ARK_MODELS`: comma-separated model allowlist (default matches the iOS app)
+- `VOLC_SPEECH_API_KEY`: enables `POST /v1/tts` (Volcengine Doubao TTS `seed-tts-2.0`). Body `{"text","speaker","speech_rate"}`, returns `audio/mpeg`. Texts up to 100 characters are cached under `TTS_CACHE_DIR` (default `<DB_PATH dir>/tts-cache`); longer texts are never stored.
+- `VOLC_TTS_SPEAKERS` (speaker allowlist, default matches the iOS app), `TTS_RATE_PER_MINUTE` (per client IP, default: `120`)
 - `LLM_MAX_BODY_MB` (default: `20`), `LLM_RATE_PER_MINUTE` (per client IP, default: `60`)
 
 ## API Examples
@@ -112,8 +114,10 @@ curl 'http://127.0.0.1:8080/v1/word/apple'
 curl 'http://127.0.0.1:8080/v1/suggest?q=app&limit=5'
 curl 'http://127.0.0.1:8080/v1/search?q=apple&mode=prefix&page=1&page_size=20'
 curl 'http://127.0.0.1:8080/v1/search?q=network security&mode=fuzzy&page=1&page_size=20'
-curl -N -X POST 'http://127.0.0.1:8080/v1/llm/openrouter' -H 'Content-Type: application/json' \
-  -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
+curl -N -X POST 'http://127.0.0.1:8080/v1/llm/ark' -H 'Content-Type: application/json' \
+  -d '{"model":"doubao-seed-2-1-lite-260915","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}'
+curl -X POST 'http://127.0.0.1:8080/v1/tts' -H 'Content-Type: application/json' \
+  -d '{"text":"serendipity","speaker":"en_female_dacey_uranus_bigtts","speech_rate":0}' -o out.mp3
 ```
 
 ## Expected ECDICT CSV Columns

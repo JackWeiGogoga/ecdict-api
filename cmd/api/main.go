@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,7 +17,9 @@ import (
 	"gogoga_dictionary/internal/feedback"
 	httpapi "gogoga_dictionary/internal/http"
 	"gogoga_dictionary/internal/llmproxy"
+	"gogoga_dictionary/internal/ratelimit"
 	"gogoga_dictionary/internal/repo"
+	"gogoga_dictionary/internal/tts"
 	"gogoga_dictionary/internal/upload"
 )
 
@@ -90,19 +93,9 @@ func main() {
 
 	var llmProxy *llmproxy.Proxy
 	proxy, err := llmproxy.New(llmproxy.Config{
-		Upstreams: map[string]llmproxy.Upstream{
-			"openrouter": {
-				URL:           getenv("LLM_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions"),
-				APIKey:        getenv("LLM_OPENROUTER_API_KEY", ""),
-				Headers:       map[string]string{"X-Title": "Lingshot iOS"},
-				AllowedModels: strings.Split(getenv("LLM_OPENROUTER_MODELS", "openai/gpt-4o,openai/gpt-4o-mini,openai/gpt-5-mini,openai/gpt-5.2,bytedance-seed/seed-1.6,deepseek/deepseek-v3.2,google/gemini-3-flash-preview"), ","),
-			},
-			"ark": {
-				URL:           getenv("LLM_ARK_URL", "https://ark.cn-beijing.volces.com/api/v3/responses"),
-				APIKey:        getenv("LLM_ARK_API_KEY", ""),
-				AllowedModels: strings.Split(getenv("LLM_ARK_MODELS", "doubao-seed-2-1-lite-260915"), ","),
-			},
-		},
+		URL:           getenv("LLM_ARK_URL", "https://ark.cn-beijing.volces.com/api/v3/responses"),
+		APIKey:        getenv("LLM_ARK_API_KEY", ""),
+		AllowedModels: strings.Split(getenv("LLM_ARK_MODELS", "doubao-seed-2-1-lite-260915"), ","),
 		MaxBodyBytes:  int64(getenvInt("LLM_MAX_BODY_MB", 20)) << 20,
 		RatePerMinute: getenvInt("LLM_RATE_PER_MINUTE", 60),
 	})
@@ -110,10 +103,30 @@ func main() {
 		log.Printf("llm proxy disabled: %v", err)
 	} else {
 		llmProxy = proxy
-		log.Printf("llm proxy enabled: %v", proxy.Providers())
+		log.Printf("llm proxy enabled")
 	}
 
-	h := httpapi.NewHandler(wordRepo, analyticsSvc, feedbackSvc, uploadSvc, llmProxy)
+	var ttsSvc *tts.Service
+	speechKey := strings.TrimSpace(getenv("VOLC_SPEECH_API_KEY", ""))
+	if speechKey != "" {
+		svc, err := tts.NewService(tts.Config{
+			APIKey:     speechKey,
+			ResourceID: getenv("VOLC_TTS_RESOURCE_ID", "seed-tts-2.0"),
+			CacheDir:   getenv("TTS_CACHE_DIR", filepath.Join(filepath.Dir(dbPath), "tts-cache")),
+			Speakers: strings.Split(getenv("VOLC_TTS_SPEAKERS",
+				"en_female_dacey_uranus_bigtts,en_female_stokie_uranus_bigtts,en_female_allison_uranus_bigtts,en_male_tim_uranus_bigtts,zh_female_vv_uranus_bigtts,zh_male_m191_uranus_bigtts"), ","),
+		})
+		if err != nil {
+			log.Printf("tts service disabled: %v", err)
+		} else {
+			ttsSvc = svc
+			log.Printf("tts service enabled")
+		}
+	} else {
+		log.Printf("tts service disabled: missing VOLC_SPEECH_API_KEY")
+	}
+
+	h := httpapi.NewHandler(wordRepo, analyticsSvc, feedbackSvc, uploadSvc, llmProxy, ttsSvc, ratelimit.New(getenvInt("TTS_RATE_PER_MINUTE", 120)))
 
 	mux := http.NewServeMux()
 	h.Register(mux)

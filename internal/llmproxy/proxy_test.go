@@ -11,12 +11,7 @@ import (
 
 func newTestProxy(t *testing.T, upstreamURL string, rate int) *Proxy {
 	t.Helper()
-	p, err := New(Config{
-		Upstreams: map[string]Upstream{
-			"ark": {URL: upstreamURL, APIKey: "secret", AllowedModels: []string{"m1"}},
-		},
-		RatePerMinute: rate,
-	})
+	p, err := New(Config{URL: upstreamURL, APIKey: "secret", AllowedModels: []string{"m1"}, RatePerMinute: rate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +40,7 @@ func TestForwardInjectsKeyAndStreamsSSE(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer client-should-not-matter")
 	rec := httptest.NewRecorder()
 
-	if err := p.Forward(rec, req, "ark"); err != nil {
+	if err := p.Forward(rec, req); err != nil {
 		t.Fatal(err)
 	}
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "text/event-stream" {
@@ -67,7 +62,7 @@ func TestForwardPassesUpstreamErrorStatus(t *testing.T) {
 	p := newTestProxy(t, upstream.URL, 10)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/llm/ark", strings.NewReader(`{"model":"m1"}`))
-	if err := p.Forward(rec, req, "ark"); err != nil {
+	if err := p.Forward(rec, req); err != nil {
 		t.Fatal(err)
 	}
 	if rec.Code != http.StatusBadRequest || rec.Body.String() != `{"error":"bad"}` {
@@ -76,30 +71,29 @@ func TestForwardPassesUpstreamErrorStatus(t *testing.T) {
 }
 
 func TestForwardRejections(t *testing.T) {
-	p := newTestProxy(t, "http://127.0.0.1:1", 1)
+	// Budget of 2: the first two cases consume it, the third must be rate limited.
+	p := newTestProxy(t, "http://127.0.0.1:1", 2)
 
 	cases := []struct {
-		name     string
-		provider string
-		body     string
-		want     error
+		name string
+		body string
+		want error
 	}{
-		{"unknown provider", "openrouter", `{"model":"m1"}`, ErrUnknownProvider},
-		{"model not allowed", "ark", `{"model":"other"}`, ErrModelNotAllowed},
-		{"rate limited", "ark", `{"model":"other"}`, ErrRateLimited},
+		{"invalid body", `not json`, ErrInvalidBody},
+		{"model not allowed", `{"model":"other"}`, ErrModelNotAllowed},
+		{"rate limited", `{"model":"other"}`, ErrRateLimited},
 	}
 	for _, tc := range cases {
-		req := httptest.NewRequest(http.MethodPost, "/v1/llm/"+tc.provider, strings.NewReader(tc.body))
-		err := p.Forward(httptest.NewRecorder(), req, tc.provider)
+		req := httptest.NewRequest(http.MethodPost, "/v1/llm/ark", strings.NewReader(tc.body))
+		err := p.Forward(httptest.NewRecorder(), req)
 		if !errors.Is(err, tc.want) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.want)
 		}
 	}
 }
 
-func TestNewSkipsProvidersWithoutKey(t *testing.T) {
-	_, err := New(Config{Upstreams: map[string]Upstream{"ark": {URL: "http://x", AllowedModels: []string{"m1"}}}})
-	if err == nil {
-		t.Fatal("expected error when no provider has a key")
+func TestNewRequiresKey(t *testing.T) {
+	if _, err := New(Config{URL: "http://x", AllowedModels: []string{"m1"}}); err == nil {
+		t.Fatal("expected error without api key")
 	}
 }
