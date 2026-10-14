@@ -5,18 +5,23 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"gogoga_dictionary/internal/apperr"
 )
 
 const (
-	maxBatchSize      = 100
-	maxEventNameLen   = 80
-	maxPageNameLen    = 40
-	maxPlatformLen    = 20
-	maxVersionLen     = 32
-	maxLanguageLen    = 32
+	MaxBatchSize      = 100
+	maxIDLen          = 128
+	maxEventNameLen   = 64
+	maxPageNameLen    = 64
+	maxShortFieldLen  = 32
 	maxParamsJSONSize = 16 << 10
+	maxEventAge       = 30 * 24 * time.Hour
+	maxEventFuture    = 24 * time.Hour
 )
 
 type Event struct {
@@ -37,24 +42,57 @@ type Event struct {
 }
 
 type Service struct {
-	db *sql.DB
+	db  *sql.DB
+	now func() time.Time
 }
 
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db}
+	return &Service{db: db, now: time.Now}
 }
 
-func (s *Service) InsertBatch(ctx context.Context, events []Event) (int, error) {
+// Result counts inserted events and events skipped as invalid. Duplicates (same event_id) are neither.
+type Result struct {
+	Accepted int
+	Rejected int
+}
+
+// InsertBatch stores valid events and skips invalid ones; only an empty/oversized batch is a client
+// error (*apperr.Validation). Any other error is internal.
+func (s *Service) InsertBatch(ctx context.Context, events []Event) (Result, error) {
 	if len(events) == 0 {
-		return 0, fmt.Errorf("missing events")
+		return Result{}, apperr.Invalid("missing events")
 	}
-	if len(events) > maxBatchSize {
-		return 0, fmt.Errorf("too many events")
+	if len(events) > MaxBatchSize {
+		return Result{}, apperr.Invalid("too many events")
+	}
+
+	now := s.now().UTC()
+	minTime, maxTime := now.Add(-maxEventAge).UnixMilli(), now.Add(maxEventFuture).UnixMilli()
+
+	var res Result
+	type row struct {
+		event  Event
+		params string
+	}
+	valid := make([]row, 0, len(events))
+	for i := range events {
+		event, paramsJSON, err := normalizeEvent(events[i])
+		if err == nil && (event.EventTimeMS < minTime || event.EventTimeMS > maxTime) {
+			err = fmt.Errorf("event_time_ms out of range")
+		}
+		if err != nil {
+			res.Rejected++
+			continue
+		}
+		valid = append(valid, row{event, paramsJSON})
+	}
+	if len(valid) == 0 {
+		return res, nil
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return Result{}, err
 	}
 	defer tx.Rollback()
 
@@ -67,52 +105,82 @@ INSERT INTO analytics_events (
 ON CONFLICT(event_id) DO NOTHING
 `)
 	if err != nil {
-		return 0, err
+		return Result{}, err
 	}
 	defer stmt.Close()
 
-	nowMS := time.Now().UTC().UnixMilli()
-	accepted := 0
-
-	for i := range events {
-		event, paramsJSON, err := normalizeEvent(events[i])
-		if err != nil {
-			return 0, fmt.Errorf("event[%d]: %w", i, err)
-		}
-
-		result, err := stmt.ExecContext(
-			ctx,
-			event.EventID,
-			event.EventName,
-			event.UserID,
-			event.SessionID,
-			event.Platform,
-			event.AppVersion,
-			event.Build,
-			event.SystemLanguage,
-			event.SystemLocale,
-			event.AppLanguage,
-			event.PageName,
-			event.EventTimeMS,
-			event.DurationMS,
-			paramsJSON,
-			nowMS,
-			nowMS,
+	nowMS := now.UnixMilli()
+	for _, v := range valid {
+		e := v.event
+		result, err := stmt.ExecContext(ctx,
+			e.EventID, e.EventName, e.UserID, e.SessionID, e.Platform, e.AppVersion, e.Build,
+			e.SystemLanguage, e.SystemLocale, e.AppLanguage, e.PageName,
+			e.EventTimeMS, e.DurationMS, v.params, nowMS, nowMS,
 		)
 		if err != nil {
-			return 0, err
+			return Result{}, err
 		}
-
-		rowsAffected, err := result.RowsAffected()
-		if err == nil && rowsAffected > 0 {
-			accepted += int(rowsAffected)
+		if n, err := result.RowsAffected(); err == nil && n > 0 {
+			res.Accepted += int(n)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return Result{}, err
 	}
-	return accepted, nil
+	return res, nil
+}
+
+// PurgeOlderThan deletes events created before cutoff in batches, returning the number removed.
+func (s *Service) PurgeOlderThan(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
+	if batchSize <= 0 {
+		batchSize = 5000
+	}
+	var total int64
+	for {
+		res, err := s.db.ExecContext(ctx, `
+DELETE FROM analytics_events
+WHERE id IN (SELECT id FROM analytics_events WHERE created_at_ms < ? LIMIT ?)`,
+			cutoff.UnixMilli(), batchSize)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+		if n < int64(batchSize) {
+			return total, nil
+		}
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(50 * time.Millisecond): // let writers in between batches
+		}
+	}
+}
+
+// RunRetention purges events older than retentionDays once at start (after a short delay) and then daily,
+// until ctx is cancelled. retentionDays <= 0 disables it.
+func (s *Service) RunRetention(ctx context.Context, retentionDays int) {
+	if retentionDays <= 0 {
+		return
+	}
+	timer := time.NewTimer(time.Minute)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		cutoff := s.now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+		n, err := s.PurgeOlderThan(ctx, cutoff, 5000)
+		if err != nil && ctx.Err() == nil {
+			slog.Error("analytics retention failed", "err", err)
+		} else if n > 0 {
+			slog.Info("analytics retention purged events", "deleted", n, "retention_days", retentionDays)
+		}
+		timer.Reset(24 * time.Hour)
+	}
 }
 
 func normalizeEvent(event Event) (Event, string, error) {
@@ -161,20 +229,27 @@ func normalizeEvent(event Event) (Event, string, error) {
 	if event.EventTimeMS <= 0 {
 		return Event{}, "", fmt.Errorf("invalid event_time_ms")
 	}
-	if len(event.EventName) > maxEventNameLen {
-		return Event{}, "", fmt.Errorf("event_name too long")
+	limits := []struct {
+		name string
+		v    string
+		max  int
+	}{
+		{"event_id", event.EventID, maxIDLen},
+		{"user_id", event.UserID, maxIDLen},
+		{"session_id", event.SessionID, maxIDLen},
+		{"event_name", event.EventName, maxEventNameLen},
+		{"page_name", event.PageName, maxPageNameLen},
+		{"platform", event.Platform, maxShortFieldLen},
+		{"app_version", event.AppVersion, maxShortFieldLen},
+		{"build", event.Build, maxShortFieldLen},
+		{"system_language", event.SystemLanguage, maxShortFieldLen},
+		{"system_locale", event.SystemLocale, maxShortFieldLen},
+		{"app_language", event.AppLanguage, maxShortFieldLen},
 	}
-	if len(event.PageName) > maxPageNameLen {
-		return Event{}, "", fmt.Errorf("page_name too long")
-	}
-	if len(event.Platform) > maxPlatformLen {
-		return Event{}, "", fmt.Errorf("platform too long")
-	}
-	if len(event.AppVersion) > maxVersionLen || len(event.Build) > maxVersionLen {
-		return Event{}, "", fmt.Errorf("version field too long")
-	}
-	if len(event.SystemLanguage) > maxLanguageLen || len(event.SystemLocale) > maxLanguageLen || len(event.AppLanguage) > maxLanguageLen {
-		return Event{}, "", fmt.Errorf("language field too long")
+	for _, l := range limits {
+		if utf8.RuneCountInString(l.v) > l.max {
+			return Event{}, "", fmt.Errorf("%s too long", l.name)
+		}
 	}
 	if event.DurationMS != nil && *event.DurationMS < 0 {
 		return Event{}, "", fmt.Errorf("invalid duration_ms")

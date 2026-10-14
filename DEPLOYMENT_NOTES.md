@@ -1,3 +1,7 @@
+> **Superseded / 已废弃** — do not follow this document. It runs the service as root and uses
+> `chmod 777`. Use [ALIYUN_DEPLOYMENT.md](./ALIYUN_DEPLOYMENT.md) (Docker Compose, non-root container,
+> API bound to 127.0.0.1 behind Caddy) instead. Kept for historical reference only.
+
 # Deployment Notes: ECDICT Go Service + Caddy Proxy
 
 Date: 2026-02-06

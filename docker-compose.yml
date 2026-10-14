@@ -6,11 +6,12 @@ services:
     image: gogoga-dictionary:latest
     container_name: gogoga-dictionary-api
     ports:
-      - "8080:8080"
+      # Loopback only: the host Caddy reverse-proxies to 127.0.0.1:8080; never expose the API directly.
+      - "127.0.0.1:8080:8080"
     environment:
       HTTP_ADDR: ":8080"
       DB_PATH: "/app/data/dict.db"
-      SCHEMA_PATH: "/app/migrations/schema.sql"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
       FEISHU_APP_ID: "${FEISHU_APP_ID}"
       FEISHU_APP_SECRET: "${FEISHU_APP_SECRET}"
       FEISHU_BITABLE_APP_TOKEN: "${FEISHU_BITABLE_APP_TOKEN}"
@@ -24,21 +25,44 @@ services:
       LLM_ARK_MODELS: "${LLM_ARK_MODELS:-}"
       LLM_MAX_BODY_MB: "${LLM_MAX_BODY_MB:-}"
       LLM_RATE_PER_MINUTE: "${LLM_RATE_PER_MINUTE:-}"
+      LLM_MAX_CONCURRENT: "${LLM_MAX_CONCURRENT:-}"
+      LLM_DAILY_REQUEST_BUDGET: "${LLM_DAILY_REQUEST_BUDGET:-}"
+      LLM_TIMEOUT_SECONDS: "${LLM_TIMEOUT_SECONDS:-}"
       VOLC_SPEECH_API_KEY: "${VOLC_SPEECH_API_KEY}"
       VOLC_TTS_SPEAKERS: "${VOLC_TTS_SPEAKERS:-}"
       TTS_RATE_PER_MINUTE: "${TTS_RATE_PER_MINUTE:-}"
+      TTS_CACHE_MAX_MB: "${TTS_CACHE_MAX_MB:-}"
+      ANALYTICS_RATE_PER_MINUTE: "${ANALYTICS_RATE_PER_MINUTE:-}"
+      ANALYTICS_RETENTION_DAYS: "${ANALYTICS_RETENTION_DAYS:-}"
+      FEEDBACK_RATE_PER_MINUTE: "${FEEDBACK_RATE_PER_MINUTE:-}"
+      UPLOAD_RATE_PER_MINUTE: "${UPLOAD_RATE_PER_MINUTE:-}"
+      SEARCH_RATE_PER_MINUTE: "${SEARCH_RATE_PER_MINUTE:-}"
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    # The API waits up to 15s for in-flight requests on SIGTERM.
+    stop_grace_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   importer:
     image: gogoga-dictionary:latest
     container_name: gogoga-dictionary-importer
-    command: ["importer", "-csv", "/app/datasets/ecdict.csv", "-db", "/app/data/dict.db", "-schema", "/app/migrations/schema.sql"]
+    command: ["importer", "-csv", "/app/datasets/ecdict.csv", "-db", "/app/data/dict.db"]
     environment:
       DB_PATH: "/app/data/dict.db"
-      SCHEMA_PATH: "/app/migrations/schema.sql"
     volumes:
       - ./data:/app/data
       - ./datasets:/app/datasets:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     profiles: ["tools"]

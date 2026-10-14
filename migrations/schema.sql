@@ -1,4 +1,4 @@
-PRAGMA journal_mode = WAL;
+-- journal_mode=WAL, synchronous=NORMAL and busy_timeout are set via the DSN (internal/db).
 
 CREATE TABLE IF NOT EXISTS words (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS words (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_words_word_lower_unique ON words(word_lower);
-CREATE INDEX IF NOT EXISTS idx_words_word_lower ON words(word_lower);
+-- Redundant with the unique index above; dropped on existing databases.
+DROP INDEX IF EXISTS idx_words_word_lower;
 CREATE INDEX IF NOT EXISTS idx_words_frq ON words(frq DESC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS words_fts USING fts5(
@@ -72,3 +73,10 @@ CREATE INDEX IF NOT EXISTS idx_analytics_event_time ON analytics_events(event_ti
 CREATE INDEX IF NOT EXISTS idx_analytics_event_name_time ON analytics_events(event_name, event_time_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_analytics_user_time ON analytics_events(user_id, event_time_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_analytics_session_time ON analytics_events(session_id, event_time_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_analytics_created_at ON analytics_events(created_at_ms);
+
+-- Idempotency for POST /v1/feedback: a client_feedback_id is forwarded to Feishu at most once.
+CREATE TABLE IF NOT EXISTS feedback_submissions (
+    client_feedback_id TEXT PRIMARY KEY,
+    created_at_ms INTEGER NOT NULL
+);

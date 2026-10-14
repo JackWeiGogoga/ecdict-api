@@ -52,6 +52,13 @@ docker compose build
 
 ## 4. 导入词库
 
+容器（api 与 importer）以非 root 用户 uid 10001 运行。首次部署或从旧版本（root 运行）升级时，先让挂载的 `data` 目录对其可写：
+
+```bash
+mkdir -p data
+sudo chown -R 10001:10001 data
+```
+
 首次部署或词库更新后执行：
 
 ```bash
@@ -68,6 +75,8 @@ docker compose --profile tools run --rm importer
 ```bash
 docker compose up -d api
 ```
+
+`docker-compose.yml` 现在只把端口发布到 `127.0.0.1:8080`（不再是 `0.0.0.0:8080`），公网无法直接访问 API，必须经由 Caddy。
 
 本机验证：
 
@@ -92,6 +101,16 @@ ecdict.gogoga.top {
     reverse_proxy 127.0.0.1:8080
 }
 ```
+
+注意：
+
+- 宿主机 Caddy 必须通过 `127.0.0.1:8080` 访问 API（compose 只绑定回环地址）。
+- 如果 Caddy 也运行在 Docker 中，`127.0.0.1` 指向的是 Caddy 容器自身：要么让 Caddy 与 API 加入同一个 Docker 网络并
+  `reverse_proxy api:8080`，要么给 Caddy 容器配置 `extra_hosts: ["host.docker.internal:host-gateway"]`，并让 API
+  端口绑定在 Caddy 能访问到的宿主机地址上。
+- API 只在直连对端属于 `TRUSTED_PROXIES` 时才信任 `X-Forwarded-For`（默认：回环、RFC1918、`fc00::/7`）。宿主机 Caddy
+  经 Docker 端口映射访问时，容器看到的对端是 Docker 网桥网关（如 `172.17.0.1`/`172.18.0.1`），已在默认范围内；如果 Caddy
+  所在网络不在默认范围，请在 `.env` 中设置 `TRUSTED_PROXIES`（逗号分隔 CIDR）。不要把公网地址段加入该列表，否则客户端可伪造 IP 绕过限流。
 
 校验并重载：
 
@@ -146,6 +165,7 @@ curl 'https://ecdict.gogoga.top/v1/word/apple'
 cd /root/project/ecdict-api
 git pull
 docker compose build
+sudo chown -R 10001:10001 data   # 从 root 运行的旧版本升级时执行一次
 docker compose up -d api
 ```
 
@@ -156,7 +176,16 @@ docker compose --profile tools run --rm importer
 docker compose up -d api
 ```
 
-## 11. 常用排查
+## 11. 安全相关配置
+
+- 限流（按客户端 IP，每分钟）：`LLM_RATE_PER_MINUTE`、`TTS_RATE_PER_MINUTE`、`ANALYTICS_RATE_PER_MINUTE`、
+  `FEEDBACK_RATE_PER_MINUTE`、`UPLOAD_RATE_PER_MINUTE`、`SEARCH_RATE_PER_MINUTE`，默认值见 README。
+- LLM：`LLM_MAX_CONCURRENT`（全局并发，默认 32）、`LLM_DAILY_REQUEST_BUDGET`（每 UTC 日全局预算，默认不限）。
+- 埋点保留：`ANALYTICS_RETENTION_DAYS`（默认 395 天）。TTS 缓存上限：`TTS_CACHE_MAX_MB`（默认 2048）。
+- 就绪检查：`curl http://127.0.0.1:8080/v1/ready`。
+- 配置不完整（例如只配置了部分 `QINIU_*`）时 API 会拒绝启动，查看 `docker compose logs api`。
+
+## 12. 常用排查
 
 查看容器状态：
 

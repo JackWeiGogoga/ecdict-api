@@ -1,8 +1,12 @@
+.env
+.env.*
+!.env.example
 .git
 .gitignore
 .cache
-data
-bin
+api
+bin/
+data/
 *.log
 
 # Large local datasets should be mounted, not copied into image

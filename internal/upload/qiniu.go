@@ -1,3 +1,4 @@
+// Package upload stores feedback screenshots in Qiniu Kodo via form upload.
 package upload
 
 import (
@@ -14,12 +15,24 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"path"
+	"regexp"
 	"strings"
 	"time"
+
+	"gogoga_dictionary/internal/apperr"
 )
 
-var ErrInvalidKeyPrefix = errors.New("invalid key prefix")
+var ErrUnsupportedImage = errors.New("unsupported image")
+
+const (
+	// MaxImageBytes is the largest accepted upload (enforced here and in the Qiniu put policy).
+	MaxImageBytes         = 10 << 20
+	DefaultKeyPrefix      = "feedback/other"
+	uploadTokenTTLSeconds = 300
+	allowedMimeLimit      = "image/jpeg;image/png;image/webp;image/heic;image/heif"
+)
 
 type Config struct {
 	AccessKey     string
@@ -76,16 +89,22 @@ func NewQiniuService(cfg Config) (*Service, error) {
 	}, nil
 }
 
-func (s *Service) UploadImage(ctx context.Context, content []byte, contentType string, originalName string, keyPrefix string) (Result, error) {
+// UploadImage stores content under a key derived from keyPrefix. The content type and extension
+// come only from the sniffed magic bytes; the client-declared Content-Type and filename are ignored.
+func (s *Service) UploadImage(ctx context.Context, content []byte, keyPrefix string) (Result, error) {
 	if len(content) == 0 {
-		return Result{}, fmt.Errorf("empty content")
+		return Result{}, apperr.Wrap(ErrUnsupportedImage, "empty file")
+	}
+	if len(content) > MaxImageBytes {
+		return Result{}, apperr.Wrap(ErrUnsupportedImage, "file too large")
+	}
+	img, ok := DetectImage(content)
+	if !ok {
+		return Result{}, apperr.Wrap(ErrUnsupportedImage, "unsupported image type")
 	}
 
-	key, err := s.makeObjectKey(contentType, originalName, keyPrefix)
-	if err != nil {
-		return Result{}, err
-	}
-	token, err := s.makeUploadToken(key, 3600)
+	key := makeObjectKey(NormalizeKeyPrefix(keyPrefix), img.Ext)
+	token, err := s.makeUploadToken(key, uploadTokenTTLSeconds)
 	if err != nil {
 		return Result{}, err
 	}
@@ -98,8 +117,10 @@ func (s *Service) UploadImage(ctx context.Context, content []byte, contentType s
 	if err := writer.WriteField("key", key); err != nil {
 		return Result{}, fmt.Errorf("build multipart key failed: %w", err)
 	}
-
-	part, err := writer.CreateFormFile("file", path.Base(key))
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, path.Base(key)))
+	header.Set("Content-Type", img.ContentType)
+	part, err := writer.CreatePart(header)
 	if err != nil {
 		return Result{}, fmt.Errorf("create multipart file failed: %w", err)
 	}
@@ -143,61 +164,32 @@ func (s *Service) UploadImage(ctx context.Context, content []byte, contentType s
 	}, nil
 }
 
-func (s *Service) makeObjectKey(contentType string, originalName string, keyPrefix string) (string, error) {
-	prefix, err := normalizeKeyPrefix(keyPrefix)
-	if err != nil {
-		return "", err
-	}
+// PublicBaseURL is the configured public origin (no trailing slash) for uploaded objects.
+func (s *Service) PublicBaseURL() string { return s.publicBaseURL }
 
-	day := time.Now().UTC().Format("20060102")
-	ext := extensionFromContentType(contentType)
-	if ext == "" {
-		ext = extensionFromName(originalName)
-	}
-	if ext == "" {
-		ext = ".jpg"
-	}
-	randomPart := randomHex(10)
-	return fmt.Sprintf("%s/%s/%d-%s%s", prefix, day, time.Now().UTC().Unix(), randomPart, ext), nil
+func makeObjectKey(prefix, ext string) string {
+	now := time.Now().UTC()
+	return fmt.Sprintf("%s/%s/%d-%s%s", prefix, now.Format("20060102"), now.Unix(), randomHex(10), ext)
 }
 
-func normalizeKeyPrefix(raw string) (string, error) {
-	trimmed := strings.Trim(strings.TrimSpace(raw), "/")
-	if trimmed == "" {
-		return "feedback", nil
-	}
-	if len(trimmed) > 80 {
-		return "", fmt.Errorf("%w: too long", ErrInvalidKeyPrefix)
-	}
-	if strings.Contains(trimmed, "..") {
-		return "", fmt.Errorf("%w: cannot contain '..'", ErrInvalidKeyPrefix)
-	}
+var keyPrefixPattern = regexp.MustCompile(`^feedback/[a-z0-9_-]{1,32}$`)
 
-	parts := strings.Split(trimmed, "/")
-	cleaned := make([]string, 0, len(parts))
-	for _, p := range parts {
-		segment := strings.TrimSpace(p)
-		if segment == "" {
-			continue
-		}
-		for _, r := range segment {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
-				continue
-			}
-			return "", fmt.Errorf("%w: only letters, numbers, '-', '_', '.', '/' are allowed", ErrInvalidKeyPrefix)
-		}
-		cleaned = append(cleaned, segment)
+// NormalizeKeyPrefix accepts only "feedback/<issueType>"; anything else becomes DefaultKeyPrefix.
+func NormalizeKeyPrefix(raw string) string {
+	p := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if keyPrefixPattern.MatchString(p) {
+		return p
 	}
-	if len(cleaned) == 0 {
-		return "feedback", nil
-	}
-	return strings.Join(cleaned, "/"), nil
+	return DefaultKeyPrefix
 }
 
 func (s *Service) makeUploadToken(key string, ttlSeconds int64) (string, error) {
 	policy := map[string]any{
-		"scope":    fmt.Sprintf("%s:%s", s.bucket, key),
-		"deadline": time.Now().UTC().Unix() + ttlSeconds,
+		"scope":      fmt.Sprintf("%s:%s", s.bucket, key),
+		"deadline":   time.Now().UTC().Unix() + ttlSeconds,
+		"fsizeLimit": MaxImageBytes,
+		"mimeLimit":  allowedMimeLimit,
+		"detectMime": 1,
 	}
 	policyJSON, err := json.Marshal(policy)
 	if err != nil {
@@ -210,40 +202,6 @@ func (s *Service) makeUploadToken(key string, ttlSeconds int64) (string, error) 
 	_, _ = mac.Write([]byte(encodedPolicy))
 	signature := enc.EncodeToString(mac.Sum(nil))
 	return s.accessKey + ":" + signature + ":" + encodedPolicy, nil
-}
-
-func extensionFromContentType(contentType string) string {
-	switch strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0])) {
-	case "image/jpeg", "image/jpg":
-		return ".jpg"
-	case "image/png":
-		return ".png"
-	case "image/webp":
-		return ".webp"
-	case "image/heic":
-		return ".heic"
-	case "image/heif":
-		return ".heif"
-	default:
-		return ""
-	}
-}
-
-func extensionFromName(name string) string {
-	n := strings.TrimSpace(name)
-	if n == "" {
-		return ""
-	}
-	ext := strings.ToLower(path.Ext(n))
-	switch ext {
-	case ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif":
-		if ext == ".jpeg" {
-			return ".jpg"
-		}
-		return ext
-	default:
-		return ""
-	}
 }
 
 func randomHex(n int) string {

@@ -2,181 +2,196 @@ package main
 
 import (
 	"context"
-	"log"
+	"database/sql"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"gogoga_dictionary/internal/analytics"
+	"gogoga_dictionary/internal/config"
 	"gogoga_dictionary/internal/db"
 	"gogoga_dictionary/internal/feedback"
-	httpapi "gogoga_dictionary/internal/http"
+	"gogoga_dictionary/internal/httpapi"
 	"gogoga_dictionary/internal/llmproxy"
-	"gogoga_dictionary/internal/ratelimit"
 	"gogoga_dictionary/internal/repo"
 	"gogoga_dictionary/internal/tts"
 	"gogoga_dictionary/internal/upload"
 )
 
 func main() {
-	addr := getenv("HTTP_ADDR", ":8080")
-	dbPath := getenv("DB_PATH", "./data/dict.db")
-	schemaPath := getenv("SCHEMA_PATH", "./migrations/schema.sql")
+	healthcheck := flag.Bool("healthcheck", false, "GET /v1/health on the local server and exit 0 if healthy (for Docker HEALTHCHECK)")
+	flag.Parse()
 
-	if err := os.MkdirAll("./data", 0o755); err != nil {
-		log.Fatalf("create data dir failed: %v", err)
-	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
 
-	conn, err := db.OpenSQLite(dbPath)
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("open db failed: %v", err)
+		logger.Error("invalid configuration", "err", err)
+		os.Exit(1)
+	}
+	if *healthcheck {
+		os.Exit(runHealthcheck(cfg.Port()))
+	}
+	if err := run(cfg, logger); err != nil {
+		logger.Error("api failed", "err", err)
+		os.Exit(1)
+	}
+}
+
+func runHealthcheck(port string) int {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/v1/health")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "status", resp.StatusCode)
+		return 1
+	}
+	return 0
+}
+
+func run(cfg config.Config, logger *slog.Logger) error {
+	cfg.LogSummary(logger)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o750); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+	conn, err := db.OpenSQLite(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
 	}
 	defer conn.Close()
-
-	if err := db.ApplySchema(context.Background(), conn, schemaPath); err != nil {
-		log.Fatalf("apply schema failed: %v", err)
+	if err := db.ApplySchema(ctx, conn, cfg.SchemaPath); err != nil {
+		return err
 	}
 
-	wordRepo := repo.NewWordRepository(conn)
-	analyticsSvc := analytics.NewService(conn)
-
-	var feedbackSvc *feedback.Service
-	feedbackAppID := strings.TrimSpace(getenv("FEISHU_APP_ID", ""))
-	feedbackAppSecret := strings.TrimSpace(getenv("FEISHU_APP_SECRET", ""))
-	feedbackAppToken := strings.TrimSpace(getenv("FEISHU_BITABLE_APP_TOKEN", ""))
-	feedbackTableID := strings.TrimSpace(getenv("FEISHU_BITABLE_TABLE_ID", ""))
-	if feedbackAppID != "" && feedbackAppSecret != "" && feedbackAppToken != "" && feedbackTableID != "" {
-		svc, err := feedback.NewService(feedback.Config{
-			AppID:     feedbackAppID,
-			AppSecret: feedbackAppSecret,
-			AppToken:  feedbackAppToken,
-			TableID:   feedbackTableID,
-		})
-		if err != nil {
-			log.Printf("feedback service disabled: %v", err)
-		} else {
-			feedbackSvc = svc
-			log.Printf("feedback service enabled")
-		}
-	} else {
-		log.Printf("feedback service disabled: missing FEISHU_* env")
-	}
-
-	var uploadSvc *upload.Service
-	qiniuAK := strings.TrimSpace(getenv("QINIU_ACCESS_KEY", ""))
-	qiniuSK := strings.TrimSpace(getenv("QINIU_SECRET_KEY", ""))
-	qiniuBucket := strings.TrimSpace(getenv("QINIU_BUCKET", ""))
-	qiniuUploadURL := strings.TrimSpace(getenv("QINIU_UPLOAD_URL", ""))
-	qiniuPublicBaseURL := strings.TrimSpace(getenv("QINIU_PUBLIC_BASE_URL", ""))
-	if qiniuAK != "" && qiniuSK != "" && qiniuBucket != "" && qiniuUploadURL != "" && qiniuPublicBaseURL != "" {
-		svc, err := upload.NewQiniuService(upload.Config{
-			AccessKey:     qiniuAK,
-			SecretKey:     qiniuSK,
-			Bucket:        qiniuBucket,
-			UploadURL:     qiniuUploadURL,
-			PublicBaseURL: qiniuPublicBaseURL,
-		})
-		if err != nil {
-			log.Printf("upload service disabled: %v", err)
-		} else {
-			uploadSvc = svc
-			log.Printf("upload service enabled")
-		}
-	} else {
-		log.Printf("upload service disabled: missing QINIU_* env")
-	}
-
-	var llmProxy *llmproxy.Proxy
-	proxy, err := llmproxy.New(llmproxy.Config{
-		URL:           getenv("LLM_ARK_URL", "https://ark.cn-beijing.volces.com/api/v3/responses"),
-		APIKey:        getenv("LLM_ARK_API_KEY", ""),
-		AllowedModels: strings.Split(getenv("LLM_ARK_MODELS", "doubao-seed-2-1-lite-260915"), ","),
-		MaxBodyBytes:  int64(getenvInt("LLM_MAX_BODY_MB", 20)) << 20,
-		RatePerMinute: getenvInt("LLM_RATE_PER_MINUTE", 60),
-	})
+	deps, err := buildDeps(cfg, conn, logger)
 	if err != nil {
-		log.Printf("llm proxy disabled: %v", err)
-	} else {
-		llmProxy = proxy
-		log.Printf("llm proxy enabled")
+		return err
 	}
-
-	var ttsSvc *tts.Service
-	speechKey := strings.TrimSpace(getenv("VOLC_SPEECH_API_KEY", ""))
-	if speechKey != "" {
-		svc, err := tts.NewService(tts.Config{
-			APIKey:     speechKey,
-			ResourceID: getenv("VOLC_TTS_RESOURCE_ID", "seed-tts-2.0"),
-			CacheDir:   getenv("TTS_CACHE_DIR", filepath.Join(filepath.Dir(dbPath), "tts-cache")),
-			Speakers: strings.Split(getenv("VOLC_TTS_SPEAKERS",
-				"en_female_dacey_uranus_bigtts,en_female_stokie_uranus_bigtts,en_female_allison_uranus_bigtts,en_male_tim_uranus_bigtts,zh_female_vv_uranus_bigtts,zh_male_m191_uranus_bigtts"), ","),
-		})
-		if err != nil {
-			log.Printf("tts service disabled: %v", err)
-		} else {
-			ttsSvc = svc
-			log.Printf("tts service enabled")
-		}
-	} else {
-		log.Printf("tts service disabled: missing VOLC_SPEECH_API_KEY")
+	go deps.Analytics.RunRetention(ctx, cfg.AnalyticsRetentionDays)
+	if deps.TTS != nil {
+		go deps.TTS.RunCacheJanitor(ctx, time.Hour)
 	}
-
-	h := httpapi.NewHandler(wordRepo, analyticsSvc, feedbackSvc, uploadSvc, llmProxy, ttsSvc, ratelimit.New(getenvInt("TTS_RATE_PER_MINUTE", 120)))
-
-	mux := http.NewServeMux()
-	h.Register(mux)
 
 	server := &http.Server{
-		Addr:              addr,
-		Handler:           logMiddleware(mux),
+		Addr:              cfg.HTTPAddr,
+		Handler:           httpapi.NewRouter(deps),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second, // LLM/TTS handlers extend their own deadline
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 
+	serveErr := make(chan error, 1)
 	go func() {
-		log.Printf("api started on %s", addr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server failed: %v", err)
-		}
+		logger.Info("api started", "addr", cfg.HTTPAddr)
+		serveErr <- server.ListenAndServe()
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
-	<-stop
+	select {
+	case err := <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("listen: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	logger.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), config.ShutdownTimeout)
 	defer cancel()
-
-	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("graceful shutdown timed out; closing connections", "err", err)
+		_ = server.Close()
 	}
-	log.Println("api stopped")
+	logger.Info("api stopped")
+	return nil
 }
 
-func getenv(key string, fallback string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
+func buildDeps(cfg config.Config, conn *sql.DB, logger *slog.Logger) (httpapi.Deps, error) {
+	deps := httpapi.Deps{
+		DB:                 conn,
+		Words:              repo.NewWordRepository(conn),
+		Analytics:          analytics.NewService(conn),
+		QiniuPublicBaseURL: cfg.Qiniu.PublicBaseURL,
+		RateLimits:         cfg.RateLimits,
+		Resolver:           cfg.Resolver,
+		Logger:             logger,
 	}
-	return v
-}
 
-func getenvInt(key string, fallback int) int {
-	v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key)))
-	if err != nil || v <= 0 {
-		return fallback
+	if cfg.Feishu.Enabled() {
+		svc, err := feedback.NewService(feedback.Config{
+			AppID:     cfg.Feishu.AppID,
+			AppSecret: cfg.Feishu.AppSecret,
+			AppToken:  cfg.Feishu.AppToken,
+			TableID:   cfg.Feishu.TableID,
+			DB:        conn,
+		})
+		if err != nil {
+			return deps, fmt.Errorf("feedback: %w", err)
+		}
+		deps.Feedback = svc
 	}
-	return v
-}
 
-func logMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
-	})
+	if cfg.Qiniu.Enabled() {
+		svc, err := upload.NewQiniuService(upload.Config{
+			AccessKey:     cfg.Qiniu.AccessKey,
+			SecretKey:     cfg.Qiniu.SecretKey,
+			Bucket:        cfg.Qiniu.Bucket,
+			UploadURL:     cfg.Qiniu.UploadURL,
+			PublicBaseURL: cfg.Qiniu.PublicBaseURL,
+		})
+		if err != nil {
+			return deps, fmt.Errorf("upload: %w", err)
+		}
+		deps.Upload = svc
+	}
+
+	if cfg.LLM.Enabled() {
+		p, err := llmproxy.New(llmproxy.Config{
+			URL:                cfg.LLM.URL,
+			APIKey:             cfg.LLM.APIKey,
+			AllowedModels:      cfg.LLM.Models,
+			MaxBodyBytes:       cfg.LLM.MaxBodyBytes,
+			Timeout:            cfg.LLM.Timeout,
+			MaxConcurrent:      cfg.LLM.MaxConcurrent,
+			DailyRequestBudget: cfg.LLM.DailyRequestBudget,
+		})
+		if err != nil {
+			return deps, fmt.Errorf("llm proxy: %w", err)
+		}
+		deps.LLM = p
+	}
+
+	if cfg.TTS.Enabled() {
+		svc, err := tts.NewService(tts.Config{
+			APIKey:        cfg.TTS.APIKey,
+			ResourceID:    cfg.TTS.ResourceID,
+			CacheDir:      cfg.TTS.CacheDir,
+			CacheMaxBytes: cfg.TTS.CacheMaxBytes,
+			Speakers:      cfg.TTS.Speakers,
+		})
+		if err != nil {
+			return deps, fmt.Errorf("tts: %w", err)
+		}
+		deps.TTS = svc
+	}
+	return deps, nil
 }

@@ -16,8 +16,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
+
+	"gogoga_dictionary/internal/apperr"
 )
 
 var (
@@ -26,6 +29,7 @@ var (
 )
 
 const (
+	maxUpstreamBytes  = 32 << 20
 	upstreamCodeChunk = 0
 	upstreamCodeDone  = 20000000
 )
@@ -40,7 +44,12 @@ type Config struct {
 	// Only texts up to this length (words, example sentences) are cached. Longer texts are
 	// one-off conversation replies: no reuse, and the privacy notice promises not to store them.
 	CacheMaxRunes int
-	HTTPClient    *http.Client
+	// CacheMaxBytes caps the disk cache; SweepCache deletes the oldest files beyond it (0 = no cap).
+	CacheMaxBytes int64
+	// UpstreamTimeout bounds one upstream call (default 30s). The call is detached from the client
+	// request so a disconnect does not waste an already-paid synthesis.
+	UpstreamTimeout time.Duration
+	HTTPClient      *http.Client
 }
 
 type Request struct {
@@ -57,7 +66,18 @@ type Service struct {
 	speakers      map[string]bool
 	maxTextRunes  int
 	cacheMaxRunes int
+	cacheMaxBytes int64
+	timeout       time.Duration
 	client        *http.Client
+
+	flightMu sync.Mutex
+	flights  map[string]*flight
+}
+
+type flight struct {
+	done  chan struct{}
+	audio []byte
+	err   error
 }
 
 func NewService(cfg Config) (*Service, error) {
@@ -74,7 +94,7 @@ func NewService(cfg Config) (*Service, error) {
 	if len(speakers) == 0 {
 		return nil, fmt.Errorf("empty speaker allowlist")
 	}
-	if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.CacheDir, cacheDirPerm); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
 
@@ -86,7 +106,13 @@ func NewService(cfg Config) (*Service, error) {
 		speakers:      speakers,
 		maxTextRunes:  cfg.MaxTextRunes,
 		cacheMaxRunes: cfg.CacheMaxRunes,
+		cacheMaxBytes: cfg.CacheMaxBytes,
+		timeout:       cfg.UpstreamTimeout,
 		client:        cfg.HTTPClient,
+		flights:       make(map[string]*flight),
+	}
+	if svc.timeout <= 0 {
+		svc.timeout = 30 * time.Second
 	}
 	if svc.resourceID == "" {
 		svc.resourceID = "seed-tts-2.0"
@@ -101,7 +127,7 @@ func NewService(cfg Config) (*Service, error) {
 		svc.cacheMaxRunes = 100
 	}
 	if svc.client == nil {
-		svc.client = &http.Client{Timeout: 30 * time.Second}
+		svc.client = &http.Client{}
 	}
 	return svc, nil
 }
@@ -110,30 +136,56 @@ func NewService(cfg Config) (*Service, error) {
 func (s *Service) Synthesize(ctx context.Context, req Request) (audio []byte, cached bool, err error) {
 	req.Text = strings.TrimSpace(req.Text)
 	if req.Text == "" || utf8.RuneCountInString(req.Text) > s.maxTextRunes {
-		return nil, false, ErrInvalidText
+		return nil, false, apperr.Wrap(ErrInvalidText, "invalid text")
 	}
 	if !s.speakers[req.Speaker] {
-		return nil, false, fmt.Errorf("%w: %s", ErrSpeakerNotAllowed, req.Speaker)
+		return nil, false, apperr.Wrap(ErrSpeakerNotAllowed, "speaker not allowed")
 	}
 	req.SpeechRate = clamp(req.SpeechRate, -50, 100)
 
-	cacheable := utf8.RuneCountInString(req.Text) <= s.cacheMaxRunes
-	path := s.cachePath(req)
-	if cacheable {
-		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-			return data, true, nil
-		}
+	if utf8.RuneCountInString(req.Text) > s.cacheMaxRunes {
+		audio, err = s.callDetached(ctx, req)
+		return audio, false, err
 	}
 
-	audio, err = s.callUpstream(ctx, req)
-	if err != nil {
-		return nil, false, err
+	path := s.cachePath(req)
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		now := time.Now()
+		_ = os.Chtimes(path, now, now) // keep hot entries young for the LRU-ish sweep
+		return data, true, nil
 	}
-	if cacheable {
+
+	// Collapse identical concurrent misses into one upstream call.
+	s.flightMu.Lock()
+	if f, ok := s.flights[path]; ok {
+		s.flightMu.Unlock()
+		select {
+		case <-f.done:
+			return f.audio, false, f.err
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		}
+	}
+	f := &flight{done: make(chan struct{})}
+	s.flights[path] = f
+	s.flightMu.Unlock()
+
+	f.audio, f.err = s.callDetached(ctx, req)
+	if f.err == nil {
 		// Cache write failures only cost a future re-synthesis; don't fail the request.
-		_ = writeFileAtomic(path, audio)
+		_ = writeFileAtomic(path, f.audio)
 	}
-	return audio, false, nil
+	s.flightMu.Lock()
+	delete(s.flights, path)
+	s.flightMu.Unlock()
+	close(f.done)
+	return f.audio, false, f.err
+}
+
+func (s *Service) callDetached(ctx context.Context, req Request) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.timeout)
+	defer cancel()
+	return s.callUpstream(ctx, req)
 }
 
 func (s *Service) cachePath(req Request) string {
@@ -194,7 +246,7 @@ func (s *Service) callUpstream(ctx context.Context, req Request) ([]byte, error)
 	}
 
 	var audio []byte
-	dec := json.NewDecoder(resp.Body)
+	dec := json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBytes))
 	for {
 		var chunk upstreamChunk
 		if err := dec.Decode(&chunk); err != nil {
@@ -224,8 +276,13 @@ func (s *Service) callUpstream(ctx context.Context, req Request) ([]byte, error)
 	}
 }
 
+const (
+	cacheDirPerm  = 0o750
+	cacheFilePerm = 0o640
+)
+
 func writeFileAtomic(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), cacheDirPerm); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
@@ -238,6 +295,10 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), cacheFilePerm); err != nil {
 		os.Remove(tmp.Name())
 		return err
 	}

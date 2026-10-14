@@ -1,5 +1,5 @@
 module gogoga_dictionary
 
-go 1.19
+go 1.26
 
 require github.com/mattn/go-sqlite3 v1.14.24
