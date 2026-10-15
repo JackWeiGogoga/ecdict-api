@@ -1,0 +1,29 @@
+# Runtime image from binaries cross-compiled by scripts/build-image.sh, so small servers never
+# compile Go/CGO themselves. Keep the runtime section in sync with Dockerfile.
+FROM debian:bookworm-slim
+WORKDIR /app
+
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY bin/linux-amd64/api /usr/local/bin/api
+COPY bin/linux-amd64/importer /usr/local/bin/importer
+COPY migrations/schema.sql ./migrations/schema.sql
+
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin app \
+    && mkdir -p /app/data /app/datasets \
+    && chown -R 10001:10001 /app/data
+
+ENV HTTP_ADDR=:8080
+ENV DB_PATH=/app/data/dict.db
+
+USER 10001
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["api", "-healthcheck"]
+
+CMD ["api"]

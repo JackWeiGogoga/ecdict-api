@@ -21,3 +21,4 @@ coverage.out
 
 .env
 .env.local
+dist/

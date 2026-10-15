@@ -169,7 +169,32 @@ curl 'https://ecdict.gogoga.top/v1/word/apple'
 
 ## 10. 后续发布
 
-代码更新后：
+### 推荐：本地编译镜像，服务器只导入（服务器内存小，编译 CGO 会拖垮线上）
+
+在开发机（Apple Silicon 或 x86 均可，需要 Docker）上：
+
+```bash
+BUILD_APT_MIRROR=mirrors.aliyun.com BUILD_GOPROXY=https://goproxy.cn,direct ./scripts/build-image.sh
+scp dist/gogoga-dictionary-<sha>.tar.gz ali:/root/
+```
+
+服务器上：
+
+```bash
+cd /root/project/ecdict-api
+git pull                                   # 同步 docker-compose.yml 等配置
+gunzip -c /root/gogoga-dictionary-<sha>.tar.gz | docker load
+docker tag gogoga-dictionary:latest gogoga-dictionary:rollback-$(date +%Y%m%d)   # 先给当前版本留回滚
+docker tag gogoga-dictionary:<sha> gogoga-dictionary:latest
+docker compose up -d --no-build api
+curl -s http://127.0.0.1:8080/v1/ready
+```
+
+回滚：`docker tag gogoga-dictionary:rollback-<日期> gogoga-dictionary:latest && docker compose up -d --no-build api`。
+
+### 备选：在服务器上编译
+
+只在内存充足、业务低峰时使用。代码更新后：
 
 ```bash
 cd /root/project/ecdict-api
