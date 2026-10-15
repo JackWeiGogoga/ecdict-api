@@ -14,6 +14,7 @@
 - `POST /v1/analytics/events`、`POST /v1/feedback`、`POST /v1/feedback/upload-image`：埋点 / 反馈
 - `POST /v1/llm/ark`：火山方舟 Responses API 代理（JSON 或 SSE）
 - `POST /v1/tts`：豆包语音合成（mp3）
+- `POST /v1/asr`：豆包语音识别（请求体为原始 WAV，返回 `{"data":{"text":...}}`；音频不落盘）
 
 所有 JSON 响应使用 `{data, error, code, request_id, server_time}` 结构；`code` 为可选的稳定错误码
 （`invalid_request`、`invalid_body`、`body_too_large`、`not_found`、`method_not_allowed`、`rate_limited`、

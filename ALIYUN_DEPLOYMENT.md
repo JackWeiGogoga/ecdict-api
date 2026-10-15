@@ -45,6 +45,16 @@ cd /root/project/ecdict-api
 
 ## 3. 构建镜像
 
+国内服务器拉取 Go 模块和 Debian 软件包较慢，在 `.env` 中设置构建镜像源（`docker-compose.yml` 会作为 build args 传入）：
+
+```bash
+BUILD_GOPROXY=https://goproxy.cn,direct
+BUILD_GOSUMDB=sum.golang.google.cn
+BUILD_APT_MIRROR=mirrors.aliyun.com
+```
+
+不要直接修改服务器上的 `Dockerfile`，否则 `git pull` 会冲突。
+
 ```bash
 cd /root/project/ecdict-api
 docker compose build

@@ -58,9 +58,17 @@ type TTS struct {
 
 func (t TTS) Enabled() bool { return t.APIKey != "" }
 
+// ASR shares the Volcengine speech API key with TTS.
+type ASR struct {
+	APIKey     string
+	ResourceID string
+}
+
+func (a ASR) Enabled() bool { return a.APIKey != "" }
+
 // RateLimits are per-client-IP requests per minute; 0 disables a limiter.
 type RateLimits struct {
-	LLM, TTS, Analytics, Feedback, Upload, Search int
+	LLM, TTS, ASR, Analytics, Feedback, Upload, Search int
 }
 
 type Config struct {
@@ -75,6 +83,7 @@ type Config struct {
 	Qiniu                  Qiniu
 	LLM                    LLM
 	TTS                    TTS
+	ASR                    ASR
 }
 
 // Load reads the environment. It fails fast on malformed numbers, bad CIDRs and partially
@@ -120,6 +129,7 @@ func load(getenv func(string) string) (Config, error) {
 		RateLimits: RateLimits{
 			LLM:       num("LLM_RATE_PER_MINUTE", 60, 0),
 			TTS:       num("TTS_RATE_PER_MINUTE", 120, 0),
+			ASR:       num("ASR_RATE_PER_MINUTE", 60, 0),
 			Analytics: num("ANALYTICS_RATE_PER_MINUTE", 60, 0),
 			Feedback:  num("FEEDBACK_RATE_PER_MINUTE", 10, 0),
 			Upload:    num("UPLOAD_RATE_PER_MINUTE", 5, 0),
@@ -153,6 +163,10 @@ func load(getenv func(string) string) (Config, error) {
 			Speakers:      list("VOLC_TTS_SPEAKERS", DefaultTTSSpeakers),
 			CacheMaxBytes: int64(num("TTS_CACHE_MAX_MB", 2048, 0)) << 20,
 		},
+	}
+	c.ASR = ASR{
+		APIKey:     c.TTS.APIKey,
+		ResourceID: str("VOLC_ASR_RESOURCE_ID", "volc.bigasr.auc_turbo"),
 	}
 	c.TTS.CacheDir = str("TTS_CACHE_DIR", filepath.Join(filepath.Dir(c.DBPath), "tts-cache"))
 
@@ -223,7 +237,7 @@ func (c Config) LogSummary(logger *slog.Logger) {
 		"trusted_proxies", c.TrustedProxies,
 		"analytics_retention_days", c.AnalyticsRetentionDays,
 		"rate_per_minute", map[string]int{
-			"llm": c.RateLimits.LLM, "tts": c.RateLimits.TTS, "analytics": c.RateLimits.Analytics,
+			"llm": c.RateLimits.LLM, "tts": c.RateLimits.TTS, "asr": c.RateLimits.ASR, "analytics": c.RateLimits.Analytics,
 			"feedback": c.RateLimits.Feedback, "upload": c.RateLimits.Upload, "search": c.RateLimits.Search,
 		},
 		"feedback_enabled", c.Feishu.Enabled(),
@@ -235,6 +249,7 @@ func (c Config) LogSummary(logger *slog.Logger) {
 		"llm_max_concurrent", c.LLM.MaxConcurrent,
 		"llm_daily_request_budget", c.LLM.DailyRequestBudget,
 		"tts_enabled", c.TTS.Enabled(),
+		"asr_enabled", c.ASR.Enabled(),
 		"tts_cache_dir", c.TTS.CacheDir,
 		"tts_cache_max_mb", c.TTS.CacheMaxBytes>>20,
 	)

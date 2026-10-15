@@ -2,12 +2,14 @@ package httpapi
 
 import (
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"gogoga_dictionary/internal/asr"
 	"gogoga_dictionary/internal/llmproxy"
 	"gogoga_dictionary/internal/ratelimit"
 	"gogoga_dictionary/internal/tts"
@@ -17,6 +19,7 @@ const (
 	maxTTSBodyBytes = 16 << 10
 	llmReadTimeout  = 90 * time.Second
 	ttsWriteTimeout = 60 * time.Second
+	asrTimeout      = 45 * time.Second
 	busyRetryAfter  = 2 * time.Second
 )
 
@@ -100,4 +103,34 @@ func (h *Handler) synthesizeSpeech(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-TTS-Cache", cacheStatus)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(audio)
+}
+
+// recognizeSpeech takes a raw WAV body (Content-Type audio/wav) and returns {"data":{"text":"..."}}.
+// The audio is only forwarded upstream: never written to disk or logged.
+func (h *Handler) recognizeSpeech(w http.ResponseWriter, r *http.Request) {
+	if h.ASR == nil {
+		unavailable(w, r, "asr service unavailable")
+		return
+	}
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(asrTimeout))
+	_ = rc.SetWriteDeadline(time.Now().Add(asrTimeout + 10*time.Second))
+
+	audio, err := io.ReadAll(http.MaxBytesReader(w, r.Body, asr.MaxAudioBytes))
+	if err != nil {
+		failDecode(w, r, classifyBodyErr(err))
+		return
+	}
+
+	text, err := h.ASR.Recognize(r.Context(), audio)
+	if err != nil {
+		if errors.Is(err, asr.ErrInvalidAudio) {
+			failErr(w, r, err, "")
+			return
+		}
+		slog.Error("asr failed", "err", err, "request_id", requestIDFrom(r))
+		fail(w, r, http.StatusBadGateway, codeUpstream, "asr upstream failed")
+		return
+	}
+	ok(w, r, map[string]string{"text": text})
 }

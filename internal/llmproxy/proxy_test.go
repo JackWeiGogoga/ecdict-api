@@ -91,7 +91,7 @@ func TestForwardSanitizesBody(t *testing.T) {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		for k := range got {
-			if !allowedFields[k] && k != "store" {
+			if !allowedFields[k] && k != "store" && k != "tools" {
 				t.Errorf("%s: forwarded disallowed field %q", tc.name, k)
 			}
 		}
@@ -107,6 +107,36 @@ func TestForwardSanitizesBody(t *testing.T) {
 		if _, ok := got["input"]; !ok {
 			t.Errorf("%s: input missing", tc.name)
 		}
+	}
+}
+
+func TestSanitizeKeepsOnlyFunctionTools(t *testing.T) {
+	p := newTestProxy(t, "http://127.0.0.1:1")
+	body := `{"model":"m1","input":"hi","tools":[{"type":"web_search"},{"type":"function","name":"play_song","parameters":{"type":"object"}}]}`
+	out, _, err := p.Sanitize([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Tools []map[string]any `json:"tools"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tools) != 1 || got.Tools[0]["name"] != "play_song" {
+		t.Fatalf("tools = %v", got.Tools)
+	}
+
+	tooMany := make([]string, MaxFunctionTools+1)
+	for i := range tooMany {
+		tooMany[i] = `{"type":"function","name":"f"}`
+	}
+	body = `{"model":"m1","input":"hi","tools":[` + strings.Join(tooMany, ",") + `]}`
+	if _, _, err := p.Sanitize([]byte(body)); !errors.Is(err, ErrInvalidBody) {
+		t.Fatalf("too many tools: err = %v", err)
+	}
+	if _, _, err := p.Sanitize([]byte(`{"model":"m1","input":"hi","tools":"x"}`)); !errors.Is(err, ErrInvalidBody) {
+		t.Fatalf("bad tools: err = %v", err)
 	}
 }
 

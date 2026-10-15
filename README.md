@@ -14,6 +14,7 @@ A Go-based dictionary web service powered by ECDICT, designed for iOS/APP word l
 - `POST /v1/analytics/events`, `POST /v1/feedback`, `POST /v1/feedback/upload-image`: app telemetry / feedback
 - `POST /v1/llm/ark`: Volcengine Ark Responses API proxy (JSON or SSE)
 - `POST /v1/tts`: Volcengine Doubao text-to-speech (mp3)
+- `POST /v1/asr`: Volcengine Doubao speech recognition (raw WAV body, returns `{"data":{"text":...}}`; audio is never stored)
 
 All JSON responses use the envelope `{data, error, code, request_id, server_time}`; `code` is an
 optional stable machine-readable error code (`invalid_request`, `invalid_body`, `body_too_large`,

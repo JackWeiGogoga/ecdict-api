@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"gogoga_dictionary/internal/analytics"
+	"gogoga_dictionary/internal/asr"
 	"gogoga_dictionary/internal/config"
 	"gogoga_dictionary/internal/db"
 	"gogoga_dictionary/internal/feedback"
@@ -192,6 +193,14 @@ func buildDeps(cfg config.Config, conn *sql.DB, logger *slog.Logger) (httpapi.De
 			return deps, fmt.Errorf("tts: %w", err)
 		}
 		deps.TTS = svc
+	}
+
+	if cfg.ASR.Enabled() {
+		svc, err := asr.NewService(asr.Config{APIKey: cfg.ASR.APIKey, ResourceID: cfg.ASR.ResourceID})
+		if err != nil {
+			return deps, fmt.Errorf("asr: %w", err)
+		}
+		deps.ASR = svc
 	}
 	return deps, nil
 }

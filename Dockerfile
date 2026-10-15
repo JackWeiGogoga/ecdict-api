@@ -1,6 +1,12 @@
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 
+# Servers in mainland China set these via build args (see docker-compose.yml / .env):
+# GOPROXY=https://goproxy.cn,direct  GOSUMDB=sum.golang.google.cn  APT_MIRROR=mirrors.aliyun.com
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG GOSUMDB=sum.golang.org
+ENV GOPROXY=${GOPROXY} GOSUMDB=${GOSUMDB}
+
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -15,7 +21,9 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
-RUN apt-get update \
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

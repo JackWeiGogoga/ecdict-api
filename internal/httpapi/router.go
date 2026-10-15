@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"gogoga_dictionary/internal/analytics"
+	"gogoga_dictionary/internal/asr"
 	"gogoga_dictionary/internal/config"
 	"gogoga_dictionary/internal/feedback"
 	"gogoga_dictionary/internal/llmproxy"
@@ -16,7 +17,7 @@ import (
 	"gogoga_dictionary/internal/upload"
 )
 
-// Deps are the services behind the API. Optional features (Feedback, Upload, LLM, TTS) may be nil,
+// Deps are the services behind the API. Optional features (Feedback, Upload, LLM, TTS, ASR) may be nil,
 // in which case their endpoints answer 503.
 type Deps struct {
 	DB        *sql.DB
@@ -26,6 +27,7 @@ type Deps struct {
 	Upload    *upload.Service
 	LLM       *llmproxy.Proxy
 	TTS       *tts.Service
+	ASR       *asr.Service
 
 	// QiniuPublicBaseURL constrains feedback screenshot_url values (see feedback.Record.Normalize).
 	QiniuPublicBaseURL string
@@ -66,6 +68,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /v1/feedback/upload-image", limit(d.RateLimits.Upload, h.uploadFeedbackImage))
 	mux.Handle("POST /v1/llm/ark", limit(d.RateLimits.LLM, h.proxyLLM))
 	mux.Handle("POST /v1/tts", limit(d.RateLimits.TTS, h.synthesizeSpeech))
+	mux.Handle("POST /v1/asr", limit(d.RateLimits.ASR, h.recognizeSpeech))
 
 	return requestIDMiddleware(accessLogMiddleware(d.Logger, d.Resolver, recoverMiddleware(jsonFallback(mux))))
 }

@@ -196,6 +196,7 @@ func TestRoutes(t *testing.T) {
 		{"feedback too large", "POST", "/v1/feedback", "application/json", jsonBody(map[string]any{"client_feedback_id": "f3", "content": strings.Repeat("x", 40<<10)}), 413, "body_too_large", nil},
 		{"tts disabled", "POST", "/v1/tts", "application/json", strings.NewReader(`{}`), 503, "service_unavailable", nil},
 		{"tts wrong method", "GET", "/v1/tts", "", nil, 405, "method_not_allowed", nil},
+		{"asr disabled", "POST", "/v1/asr", "audio/wav", strings.NewReader("RIFF"), 503, "service_unavailable", nil},
 		{"llm non-stream", "POST", "/v1/llm/ark", "application/json", strings.NewReader(`{"model":"m1","input":"x"}`), 200, "", nil},
 		{"llm model not allowed", "POST", "/v1/llm/ark", "application/json", strings.NewReader(`{"model":"gpt","input":"x"}`), 400, "invalid_request", nil},
 		{"llm missing input", "POST", "/v1/llm/ark", "application/json", strings.NewReader(`{"model":"m1"}`), 400, "invalid_request", nil},

@@ -29,11 +29,14 @@ const (
 	DefaultMaxBodyBytes    = 6 << 20
 	DefaultMaxOutputTokens = 4500
 	DefaultMaxConcurrent   = 32
-	DefaultTimeout         = 180 * time.Second
+	// MaxFunctionTools caps the function tool definitions forwarded per request.
+	MaxFunctionTools = 16
+	DefaultTimeout   = 180 * time.Second
 )
 
 // allowedFields is the complete set of top-level keys forwarded upstream. Everything else
-// (store, tools, previous_response_id, instructions, ...) is dropped.
+// (store, previous_response_id, instructions, ...) is dropped. "tools" is handled separately
+// by sanitizeTools: only client-side function tools pass, never paid built-ins like web_search.
 var allowedFields = map[string]bool{
 	"model":             true,
 	"input":             true,
@@ -180,6 +183,15 @@ func (p *Proxy) Sanitize(body []byte) ([]byte, string, error) {
 		}
 	}
 	out["model"] = model
+	if raw, ok := in["tools"]; ok {
+		tools, err := sanitizeTools(raw)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(tools) > 0 {
+			out["tools"] = tools
+		}
+	}
 
 	maxTokens := int64(DefaultMaxOutputTokens)
 	if raw, ok := in["max_output_tokens"]; ok && string(raw) != "null" {
@@ -199,6 +211,31 @@ func (p *Proxy) Sanitize(body []byte) ([]byte, string, error) {
 		return nil, "", ErrInvalidBody
 	}
 	return encoded, model, nil
+}
+
+// sanitizeTools keeps only {"type":"function"} tools, up to MaxFunctionTools.
+func sanitizeTools(raw json.RawMessage) ([]json.RawMessage, error) {
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		return nil, ErrInvalidBody
+	}
+	kept := make([]json.RawMessage, 0, len(tools))
+	for _, tool := range tools {
+		var head struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(tool, &head) != nil || head.Type != "function" {
+			continue
+		}
+		if len(kept) == MaxFunctionTools {
+			return nil, ErrInvalidBody
+		}
+		kept = append(kept, tool)
+	}
+	return kept, nil
 }
 
 func isNullOrEmpty(raw json.RawMessage) bool {

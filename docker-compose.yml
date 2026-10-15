@@ -3,6 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        GOPROXY: "${BUILD_GOPROXY:-https://proxy.golang.org,direct}"
+        GOSUMDB: "${BUILD_GOSUMDB:-sum.golang.org}"
+        APT_MIRROR: "${BUILD_APT_MIRROR:-}"
     image: gogoga-dictionary:latest
     container_name: gogoga-dictionary-api
     ports:
@@ -32,6 +36,8 @@ services:
       VOLC_TTS_SPEAKERS: "${VOLC_TTS_SPEAKERS:-}"
       TTS_RATE_PER_MINUTE: "${TTS_RATE_PER_MINUTE:-}"
       TTS_CACHE_MAX_MB: "${TTS_CACHE_MAX_MB:-}"
+      VOLC_ASR_RESOURCE_ID: "${VOLC_ASR_RESOURCE_ID:-}"
+      ASR_RATE_PER_MINUTE: "${ASR_RATE_PER_MINUTE:-}"
       ANALYTICS_RATE_PER_MINUTE: "${ANALYTICS_RATE_PER_MINUTE:-}"
       ANALYTICS_RETENTION_DAYS: "${ANALYTICS_RETENTION_DAYS:-}"
       FEEDBACK_RATE_PER_MINUTE: "${FEEDBACK_RATE_PER_MINUTE:-}"
