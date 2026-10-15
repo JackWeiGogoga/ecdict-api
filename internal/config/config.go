@@ -166,7 +166,7 @@ func load(getenv func(string) string) (Config, error) {
 	}
 	c.ASR = ASR{
 		APIKey:     c.TTS.APIKey,
-		ResourceID: str("VOLC_ASR_RESOURCE_ID", "volc.bigasr.auc_turbo"),
+		ResourceID: str("VOLC_ASR_RESOURCE_ID", "volc.seedasr.auc"),
 	}
 	c.TTS.CacheDir = str("TTS_CACHE_DIR", filepath.Join(filepath.Dir(c.DBPath), "tts-cache"))
 
